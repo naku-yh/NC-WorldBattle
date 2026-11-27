@@ -12,6 +12,7 @@ import { Hud, type Sel, type Tab } from './hud';
 import { PauseMenu, openLoadPanel } from './menus';
 import { Minimap } from './minimap';
 import { Overlays, type SetupState } from './overlays';
+import { Press } from './press';
 import { SAVE_ERROR_TEXT, readSave, writeSave } from './saves';
 import { Scores } from './scores';
 import { diorama } from './showcase';
@@ -82,7 +83,10 @@ export class Controller {
   private speed = 1;
   /** `${phase}:${player}:${round}` of the phase currently being run. */
   private turnKey = '';
-  private down = { x: 0, y: 0, on: false };
+  /** The pointer on the board, and whether its lifting was a click rather than the end of a drag or a pinch. */
+  private press = new Press();
+  /** The tile a finger has picked for the building being placed: a second tap there confirms it (see `click`). */
+  private aim: string | null = null;
   /** Space is held: dragging slides the board instead of turning the camera. */
   private space = false;
   private cam: Glide | null = null;
@@ -149,21 +153,20 @@ export class Controller {
 
     const canvas = scene.canvas;
     canvas.addEventListener('pointerdown', (e) => {
-      this.down = { x: e.clientX, y: e.clientY, on: e.button === 0 };
+      // Two fingers are a pinch or a pan (the camera's own to handle), never a click.
+      if (e.isPrimary) this.press.down(e.clientX, e.clientY, e.button);
+      else this.press.join();
     });
     canvas.addEventListener('pointerup', (e) => {
-      // Take the press record and clear it in one step: mutating it in place
-      // would also change `d`, since both point at the same object.
-      const d = this.down;
-      this.down = { x: 0, y: 0, on: false };
-      if (!d.on || e.button !== 0) return;
-      // A drag orbits (or, with Space, slides) the camera; only a stationary press is a click.
-      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return;
+      if (!e.isPrimary || !this.press.up(e.clientX, e.clientY, e.button)) return;
       if (this.space) return;
-      this.click(e.clientX, e.clientY);
+      // A finger has no hover to show where a building would go: the first tap only points (see `click`).
+      this.click(e.clientX, e.clientY, e.pointerType !== 'mouse');
     });
+    canvas.addEventListener('pointercancel', () => this.press.lose());
     canvas.addEventListener('pointermove', (e) => {
-      if (!this.store || this.space) return;
+      // A finger is never merely hovering: where it goes while it is down is the camera's business.
+      if (!this.store || this.space || e.pointerType !== 'mouse') return;
       if (this.placing) {
         this.previewPlace(this.scene.tileAt(e.clientX, e.clientY));
         return;
@@ -172,7 +175,9 @@ export class Controller {
       this.view.setHover(tile);
       canvas.style.cursor = view ? 'pointer' : 'default';
     });
-    canvas.addEventListener('pointerleave', () => {
+    canvas.addEventListener('pointerleave', (e) => {
+      // A lifted finger leaves too: the spot it just picked for a building stays picked.
+      if (e.pointerType !== 'mouse') return;
       if (this.placing) this.scene.setGhost([], true);
       this.view.setHover(null);
     });
@@ -213,7 +218,10 @@ export class Controller {
       e.preventDefault();
       this.setPan(false);
     });
-    window.addEventListener('blur', () => this.setPan(false));
+    window.addEventListener('blur', () => {
+      this.press.lose();
+      this.setPan(false);
+    });
     view.onSelectedGone = () => {
       this.sel = null;
       this.refreshSelection();
@@ -606,12 +614,24 @@ export class Controller {
     return lv.attack > 0 && b.powered && !b.fired;
   }
 
-  private click(x: number, y: number): void {
+  /** `finger` is true when the tap came from something that cannot hover, so nothing has shown yet where a building would go. */
+  private click(x: number, y: number, finger: boolean): void {
     const s = this.state;
     if (!s || !this.humanTurn() || this.view.busy || this.overlays.blocking) return;
     const p = s.players[s.currentPlayer];
     const { view, tile } = this.view.pick(x, y);
     if (this.placing) {
+      if (tile && finger && this.anchorFor(tile)) {
+        const at = `${tile.x},${tile.y}`;
+        // A finger is too blunt to drop a 2×2 building outright: the first tap on a tile shows the
+        // footprint there, and the next tap on the same tile builds it. Anywhere else moves the preview.
+        if (this.aim !== at) {
+          this.aim = at;
+          this.previewPlace(tile);
+          this.render();
+          return;
+        }
+      }
       if (tile) this.placeAt(tile);
       return;
     }
@@ -703,6 +723,8 @@ export class Controller {
       this.dispatch({ type: 'BUILD', key: k });
       return;
     }
+    // Another building may already have a spot picked out for it: that choice does not carry over.
+    this.clearPlace();
     this.placing = k;
     this.tab = 'build';
     this.select(null);
@@ -718,6 +740,7 @@ export class Controller {
   /** Drops the placement preview and its highlights, without touching the sidebar. */
   private clearPlace(): void {
     this.placing = null;
+    this.aim = null;
     this.scene.setGhost([], true);
     this.view.highlightTiles([], HIGHLIGHT.build);
   }
@@ -816,6 +839,7 @@ export class Controller {
       inspect: this.inspect,
       tile: this.tile,
       placing: this.placing,
+      aimed: this.aim !== null,
       focusProducer: this.tab === 'produce' ? this.producerOf(this.inspect) : null,
       scrollProducer: this.scrollToProducer,
       humanTurn: this.humanTurn(),

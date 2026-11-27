@@ -1,5 +1,5 @@
 import type { GameState } from '../game/types';
-import { focusInside, h, keepFocusIn, sheen } from './dom';
+import { focusInside, h, keepFocusIn, sheen, touchOnly } from './dom';
 import { glyph, type Glyph } from './icons';
 import type { Overlays } from './overlays';
 import { rulesPanel } from './rules';
@@ -141,7 +141,8 @@ export class PauseMenu {
         h('div', { class: 'pause-title' }, '已暂停'),
         info ? h('div', { class: 'pause-sub' }, h('span', { class: 'dot', style: `--c:${info.color}` }), info.turn, h('i', { class: 'sep' }), info.moment) : null,
       ),
-      item('继续游戏', 'play', 'amber', { text: 'Esc', key: true }, () => this.a.resume()),
+      // The key cap only makes sense where there is a key to press.
+      item('继续游戏', 'play', 'amber', touchOnly() ? null : { text: 'Esc', key: true }, () => this.a.resume()),
       item('玩法', 'book', '', { text: '规则、操作与消耗一览' }, () => this.draw('rules')),
       item('保存存档', 'save', '', { text: mySave(this.a) }, () => this.draw('save')),
       item('重新开始', 'restart', '', { text: '同一设置，新地图' }, () => void this.restart()),
@@ -151,7 +152,7 @@ export class PauseMenu {
 
   /** The rulebook: the same fold-out sections the sidebar used to carry, on a darker pane so the small print stays legible over the board. */
   private book(): HTMLElement {
-    const back = h('button', { class: 'gbtn round', title: '返回菜单（Esc）', html: glyph('back') });
+    const back = h('button', { class: 'gbtn round', title: touchOnly() ? '返回菜单' : '返回菜单（Esc）', html: glyph('back') });
     back.onclick = () => this.back();
     return h(
       'div',
@@ -162,7 +163,7 @@ export class PauseMenu {
   }
 
   private saver(): HTMLElement {
-    const back = h('button', { class: 'gbtn round', title: '返回菜单（Esc）', html: glyph('back') });
+    const back = h('button', { class: 'gbtn round', title: touchOnly() ? '返回菜单' : '返回菜单（Esc）', html: glyph('back') });
     back.onclick = () => this.back();
     return h(
       'div',
@@ -236,7 +237,7 @@ export function openLoadPanel(o: Overlays, a: LoadActions): void {
           'div',
           { class: 'pause-head' },
           h('div', { class: 'pause-title' }, '加载存档'),
-          h('div', { class: 'pause-sub' }, any ? '选一份存档，接着上次的进度继续' : '开一局游戏，按 Esc 打开菜单就能保存'),
+          h('div', { class: 'pause-sub' }, any ? '选一份存档，接着上次的进度继续' : `开一局游戏，${touchOnly() ? '点顶栏的“菜单”' : '按 Esc 打开菜单'}就能保存`),
         ),
         slotList('load', slots, {
           pick: (slot) => {

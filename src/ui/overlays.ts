@@ -1,6 +1,6 @@
 import { MAP_SIZES, MIN_TURNS, PLAYER_NAMES } from '../game/data';
 import type { GameConfig, GameState, PlayerState } from '../game/types';
-import { focusInside, h, sheen } from './dom';
+import { focusInside, h, sheen, touchOnly } from './dom';
 import { die, glyph } from './icons';
 import { RULES_HTML } from './rules';
 
@@ -245,7 +245,7 @@ export class Overlays {
           h('div', {}, h('h3', {}, `总回合数（至少 ${MIN_TURNS}）`), h('span', { class: 'stepper' }, ...stepper(st, draw))),
         ),
         // A line of its own above the buttons: sharing their row, the buttons left it no width to lie down in.
-        h('p', { class: 'setup-hint' }, '拖动旋转 · 滚轮缩放 · Esc 返回首页'),
+        h('p', { class: 'setup-hint' }, touchOnly() ? '单指拖动旋转 · 双指缩放 · 点“返回首页”离开' : '拖动旋转 · 滚轮缩放 · Esc 返回首页'),
         h('div', { class: 'setup-foot' }, start, rulesBtn, back),
       );
       onPreview(toConfig(st));

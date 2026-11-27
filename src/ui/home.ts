@@ -1,4 +1,4 @@
-import { h } from './dom';
+import { h, touchOnly } from './dom';
 import { glyph } from './icons';
 import { SAVE_SLOTS, listSlots } from './saves';
 
@@ -56,9 +56,10 @@ export class Home {
       h(
         'footer',
         { class: 'home-foot' },
-        h('span', {}, '游戏中按 ', h('kbd', {}, 'Esc'), ' 暂停与保存'),
-        h('span', {}, '拖动旋转视角'),
-        h('span', {}, '滚轮缩放'),
+        // A tablet tapped with fingers has neither an Esc key nor a wheel: it says what to do by hand instead.
+        ...(touchOnly()
+          ? [h('span', {}, '游戏中点顶栏的“菜单”暂停与保存'), h('span', {}, '单指拖动旋转视角'), h('span', {}, '双指捏合缩放')]
+          : [h('span', {}, '游戏中按 ', h('kbd', {}, 'Esc'), ' 暂停与保存'), h('span', {}, '拖动旋转视角'), h('span', {}, '滚轮缩放')]),
       ),
     );
     mount.append(this.el);

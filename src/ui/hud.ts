@@ -2,7 +2,7 @@ import { ALIENS, BUILDABLE, BUILDINGS, HARVEST_YIELD, PRODUCED_UNITS, RESOURCES,
 import { alienById, attackPower, buildingById, canBuild, canProduce, canUpgrade, countBuilding, hqOf, netDefense, nextLevelOf, spiderById, statsOf, unitById } from '../game/engine';
 import { terrainAt, zoneSize } from '../game/board';
 import type { BuildingKey, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Resources, TerrainDef, TerrainEffect, UnitFamily, UnitKey } from '../game/types';
-import { fmt, h } from './dom';
+import { fmt, h, touchOnly } from './dom';
 import { alienIcon, buildingIcon, glyph, icon, iconBox, spiderIcon, terrainIcon, unitIcon, type IconName } from './icons';
 import { costText, effectOf } from './rules';
 
@@ -21,6 +21,8 @@ export interface HudCtx {
   tile: Pt | null;
   /** The building the player is choosing a spot for. */
   placing: BuildingKey | null;
+  /** A finger has tapped a tile for the building being placed and is one more tap away from building it there. */
+  aimed: boolean;
   /** A producer of the player's own that is being looked at: its line on the "生产" page is lit, and scrolled to the first time. */
   focusProducer: BuildingKey | null;
   /** Only on the render that follows the click: after that the page keeps the place the player scrolled to. */
@@ -410,14 +412,16 @@ export class Hud {
       ),
       h('span', { class: 'spacer' }),
     );
+    // Tapped with fingers there is no Esc to speak of: the help only names what can be pressed.
+    const touch = touchOnly();
     const speed = h('button', { class: 'btn small ghost', title: '电脑玩家行动的速度' }, `速度 ×${ctx.speed}`);
     speed.onclick = this.a.toggleSpeed;
     const home = h('button', { class: 'btn small ghost', title: '把镜头移回能看见整张地图的角度' }, '全局视角');
     home.onclick = this.a.overview;
-    const rules = h('button', { class: 'btn small ghost', title: '暂停游戏并打开玩法说明（Esc 菜单里也有）' }, '玩法说明');
+    const rules = h('button', { class: 'btn small ghost', title: `暂停游戏并打开玩法说明${touch ? '' : '（Esc 菜单里也有）'}` }, '玩法说明');
     rules.onclick = this.a.showRules;
     // Saving, starting over and leaving all live behind this one button.
-    const menu = h('button', { class: 'btn small ghost', title: '暂停游戏：保存、重新开始或退出（Esc）' }, h('span', { class: 'btn-ico', html: glyph('menu') }), '菜单', h('kbd', {}, 'Esc'));
+    const menu = h('button', { class: 'btn small ghost', title: `暂停游戏：保存、重新开始或退出${touch ? '' : '（Esc）'}` }, h('span', { class: 'btn-ico', html: glyph('menu') }), '菜单', touch ? null : h('kbd', {}, 'Esc'));
     menu.onclick = this.a.menu;
     el.append(speed, home, rules, menu);
   }
@@ -489,7 +493,7 @@ export class Hud {
         const end = h('button', { class: 'btn primary' }, '结束回合');
         end.onclick = this.a.endTurn;
         foot.append(end);
-        if (p.ap > 0) foot.append(h('div', { class: 'note' }, h('div', {}, `剩余行动点 ${p.ap}`), h('div', {}, '可用Tab切换单位')));
+        if (p.ap > 0) foot.append(h('div', { class: 'note' }, h('div', {}, `剩余行动点 ${p.ap}`), h('div', {}, `可用${touchOnly() ? '“下一个待命”' : 'Tab'}切换单位`)));
       } else {
         foot.append(h('div', { class: 'note', style: 'flex:1' }, p.kind === 'ai' ? '电脑玩家行动中…' : '等待其他玩家…'));
       }
@@ -517,12 +521,18 @@ export class Hud {
         if (placing) {
           const cancel = h('button', { class: 'btn small' }, '取消');
           cancel.onclick = this.a.cancelPlace;
+          // A mouse sees the footprint before it clicks; a finger has to tap first, so it confirms with a second tap.
+          const how = touchOnly()
+            ? ctx.aimed
+              ? '再点一次这里确认放置；点别的格子换个位置。'
+              : '先点一下高亮格子看位置（绿色可行，红色不行），再点一次确认放置。'
+            : '点击自己领地里的高亮格子放置（绿色可行，红色不行）。';
           box.append(
             h(
               'div',
               { class: 'placing placing-bar' },
               iconBox(buildingIcon(placing, 1)),
-              h('div', { class: 'info' }, h('b', {}, `正在放置：${BUILDINGS[placing].levels[0].name}`), h('div', { class: 'hint' }, '点击自己领地里的高亮格子放置（绿色可行，红色不行）。')),
+              h('div', { class: 'info' }, h('b', {}, `正在放置：${BUILDINGS[placing].levels[0].name}`), h('div', { class: 'hint' }, how)),
               cancel,
             ),
           );
@@ -660,14 +670,15 @@ export class Hud {
     // Under the figures: the ground under its feet, how to command it, and the way out.
     const actions: HTMLElement[] = [];
     if (mine) {
-      const next = h('button', { class: 'btn small', title: '快捷键 Tab' }, '下一个待命');
+      const touch = touchOnly();
+      const next = h('button', { class: 'btn small', title: touch ? '轮到下一个还能行动的单位' : '快捷键 Tab' }, '下一个待命');
       next.onclick = this.a.nextUnit;
       const cancel = h('button', { class: 'btn small ghost' }, '取消');
       cancel.onclick = this.a.deselect;
       actions.push(next, cancel);
     }
     const notes = [info.terrain, info.help ? h('div', { class: 'help' }, info.help) : null];
-    if (!mine && !ctx.humanTurn && ref) notes.push(h('div', { class: 'help' }, '点击空地关闭 · Esc 打开暂停菜单'));
+    if (!mine && !ctx.humanTurn && ref) notes.push(h('div', { class: 'help' }, `点击空地关闭 · ${touchOnly() ? '“菜单”' : 'Esc'}打开暂停菜单`));
     if (notes.some(Boolean) || actions.length) body.append(h('div', { class: 'card-foot' }, h('div', { class: 'notes' }, ...notes), actions.length ? h('div', { class: 'card-actions' }, ...actions) : null));
     el.append(h('div', { class: 'card' }, iconBox(info.art), body));
   }

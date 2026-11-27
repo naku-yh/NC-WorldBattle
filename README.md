@@ -1,6 +1,6 @@
 # NC WorldBattle
 
-回合制 3D 即时战略，浏览器里直接玩。2–4 名玩家各占正方形地图一角，每回合掷骰子争夺行动点，采集矿石 / 石油 / 肉，建设基地、训练部队，在终局按**积分**定胜负。地图每局随机生成，从第 5–8 回合起陆续有外星人来袭。
+回合制 3D 即时战略，浏览器里直接玩，也可以打包成原生 iPad App。2–4 名玩家各占正方形地图一角，每回合掷骰子争夺行动点，采集矿石 / 石油 / 肉，建设基地、训练部队，在终局按**积分**定胜负。地图每局随机生成，从第 5–8 回合起陆续有外星人来袭。
 
 ![tech](https://img.shields.io/badge/tech-Vite%20%2B%20TypeScript%20%2B%20Three.js-7dd3fc?style=flat-square)
 
@@ -45,6 +45,39 @@ npm run dev      # 打开 http://127.0.0.1:5173/
 
 完整操作表见 [docs/GAME_DESIGN.md](docs/GAME_DESIGN.md) 第 10 节。
 
+在没有鼠标和键盘的触屏设备上（iPad、平板浏览器），操作换成点按和手势，界面里的提示文字也会自动换成下面的说法：
+
+| 操作 | 触屏方式 |
+|---|---|
+| 镜头 | 单指拖动旋转 · 双指捏合缩放 · 双指拖动平移 |
+| 查看 / 选择 / 移动 / 攻击 | 轻点，等同于鼠标左键；双指手势结束时不会被误判成一次点击 |
+| 放置建筑 | **先点一下格子看位置**（绿色可行、红色不行），**再点一次确认**；点别的格子换位置，侧栏“取消”放弃 |
+| 取消选择 | 轻点空地 |
+| 暂停菜单 | 顶栏“菜单”按钮 |
+| 下一个待命单位 | 单位卡片上的“下一个待命”按钮 |
+
+## iPad 版
+
+同一套网页代码用 [Capacitor](https://capacitorjs.com) 8 打包成原生 iPad App：仅 iPad、横屏、全屏，状态栏隐藏，可以离线玩。原生工程在 `ios/`，依赖用 Swift Package Manager 管理，**不需要 CocoaPods**。
+
+```bash
+npm run ios        # 网页构建（tsc + vite）+ 把 dist/ 同步进原生工程
+npm run ios:open   # 用 Xcode 打开 ios/App/App.xcodeproj
+```
+
+在 Xcode 里确认好 Team，连接 iPad（iPad 需打开“设置 → 隐私与安全性 → 开发者模式”），选设备后运行即可。命令行的等价写法：
+
+```bash
+xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release -sdk iphoneos \
+  -destination 'id=<设备 UDID>' -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+xcrun devicectl device install app --device <设备 UDID> <构建产物路径>/App.app
+```
+
+- `capacitor.config.ts`：App ID `com.nakustudio.NCWorldBattle`、显示名、网页目录，以及 WebView 的底色（与页面同为深蓝，启动时不闪白）。
+- `ios/App/App/public/`、`capacitor.config.json`、`config.xml` 由 `npm run ios` 生成，不进版本库；`ios/` 里其余文件（工程、Info.plist、启动图、图标）需要提交。
+- 图标和启动图用的是首页的 LOGO：`ios/App/App/Assets.xcassets`（图标为 1024×1024、不带透明通道）。
+- 存档仍在 `localStorage`，存在 App 自己的沙盒里，删除 App 会一并删除。
+
 ## 项目结构
 
 ```
@@ -58,6 +91,8 @@ src/
     __tests__/    规则测试
   render/   3D 画面（Three.js）：模型、场景、地形景物、水面、穹顶、蒸汽、特效、实体动画
   ui/       界面：首页、暂停菜单（含玩法）、存档、积分榜、侧边栏、采集面板、小地图、图标、玩法说明、弹层、交互控制
+ios/          iPad 版的原生工程（Capacitor + Swift Package Manager），见「iPad 版」
+capacitor.config.ts  iPad 版的 App ID、名称与网页目录
 docs/
   GAME_DESIGN.md  设计文档（规则解读与数值表，权威来源）
 ```
@@ -67,9 +102,10 @@ docs/
 ## 测试与构建
 
 ```bash
-npm test         # 规则、存档与菜单测试（骰子、经济、战斗、地形、五种外星人、积分、基地与防御网升级、续局一致）
+npm test         # 规则、存档、菜单与触屏点按的测试（骰子、经济、战斗、地形、五种外星人、积分、基地与防御网升级、续局一致）
 npm run build    # 类型检查（tsc strict）+ vite 打包到 dist/
 npm run preview  # 预览打包结果
+npm run ios      # 打包网页并同步进 iPad 工程（之后用 Xcode 或 xcodebuild 构建签名）
 ```
 
 ## 设计文档
@@ -83,4 +119,4 @@ npm run preview  # 预览打包结果
 ### 字体
 
 - **Chakra Petch**（标题与数字的展示字体，随包内置 500/600/700 三个字重）：采用 [SIL Open Font License 1.1](https://openfontlicense.org)，**允许商用**——可用于商业产品、可随软件分发、可嵌入，协议全文见 [public/OFL-ChakraPetch.txt](public/OFL-ChakraPetch.txt)（每次构建会一并输出到 dist）。OFL 的限制只有两条：不能把字体文件单独出售；若修改字体必须改名后再分发。
-- **中文界面字体**（PingFang SC、Hiragino Sans GB、Microsoft YaHei、system-ui 等）：只是在 CSS 里引用**用户操作系统里已装好的字体**，不随游戏分发任何字体文件，网页引用系统字体不需要授权；系统里没有这些字体时自动回退到默认无衬线体。注意：若将来把游戏打包成原生应用并**内嵌**这些系统的字体文件，才需要另行取得相应授权。
+- **中文界面字体**（PingFang SC、Hiragino Sans GB、Microsoft YaHei、system-ui 等）：只是在 CSS 里引用**用户操作系统里已装好的字体**，不随游戏分发任何字体文件，网页引用系统字体不需要授权；系统里没有这些字体时自动回退到默认无衬线体。注意：iPad 版同样只是在 CSS 里引用 iPadOS 自带的字体，除了 Chakra Petch 之外**没有内嵌任何字体文件**；若将来内嵌这些系统的字体文件，才需要另行取得相应授权。

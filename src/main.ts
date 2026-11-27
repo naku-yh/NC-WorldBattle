@@ -7,9 +7,12 @@ import './styles.css';
 import { Scene } from './render/scene';
 import { GameView } from './render/view';
 import { Controller } from './ui/controller';
+import { fitShell } from './ui/shell';
 
 const el = (id: string): HTMLElement => document.getElementById(id)!;
 
+// First, before anything is laid out: in the iPad app the page fills the screen exactly.
+fitShell();
 const scene = new Scene(el('scene') as HTMLCanvasElement);
 const view = new GameView(scene, el('floaters'));
 const game = new Controller(scene, view, {

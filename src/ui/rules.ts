@@ -1,6 +1,6 @@
 import { ALIENS, ALIEN_CAP, ALIEN_EVERY, ALIEN_KEYS, BUILDABLE, BUILDINGS, MAP_SIZES, MIN_TURNS, RESOURCES, SCORE_BUILDING, SCORE_LAST_HIT, SPIDERLING, TERRAIN, UNITS } from '../game/data';
 import type { AlienKey, BuildingDef, Cost, ResourceKey, Terrain, UnitKey } from '../game/types';
-import { h } from './dom';
+import { h, touchOnly } from './dom';
 import { alienIcon, buildingIcon, icon, iconBox, spiderIcon, terrainIcon, unitIcon } from './icons';
 
 const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
@@ -151,6 +151,8 @@ export function rulesPanel(): HTMLElement {
   const alienRows = ALIEN_KEYS.map((k) =>
     h('div', { class: 'rule-row' }, iconBox(alienIcon(k)), h('div', { class: 'info' }, h('div', { class: 'name' }, ALIENS[k].name, h('span', { class: 'tag warn' }, ALIENS[k].look)), h('div', { class: 'sub' }, alienStats(k)), h('div', { class: 'sub' }, ALIENS[k].desc))),
   );
+  // "操作" and "暂停与存档" each say the same things twice over: once for a mouse and keyboard, once for fingers.
+  const touch = touchOnly();
   return h(
     'div',
     { class: 'rules-panel' },
@@ -208,17 +210,47 @@ export function rulesPanel(): HTMLElement {
       h('div', { class: 'rule-row' }, iconBox(spiderIcon()), h('div', { class: 'info' }, h('div', { class: 'name' }, SPIDERLING.name, h('span', { class: 'tag warn' }, `${ALIENS.kuide.name}孵化的`)), h('div', { class: 'sub' }, `生命 ${SPIDERLING.hp} · 攻击 ${SPIDERLING.attack} · 防御 ${SPIDERLING.defense} · 随机攻击`))),
       h('p', {}, '击败外星人还能按伤害分得资源奖励。'),
     ),
-    section(
-      '操作',
-      false,
-      h('ul', {}, li('左键：选择单位 / 建筑下达命令；点击空地查看地块。'), li('拖动：旋转视角；滚轮：缩放；', b('按住空格拖动'), '或右键拖动：平移地图。'), li(b('点击左上角小地图'), '：回到全局视角。'), li('右键：取消选择，或放弃放置建筑。'), li('Tab：下一个待命单位；E：结束回合；1 / 2 / 3：切换右侧栏的建造 / 生产 / 建筑页。')),
-    ),
+    section('操作', false, touch ? ordersByFinger() : ordersByHand()),
     section(
       '暂停与存档',
       false,
-      h('ul', {}, li(b('Esc'), '或顶栏的“菜单”：暂停游戏并弹出菜单，再按一次继续。'), li('菜单里可以', b('看玩法'), '（就是这一页）、', b('保存存档'), '、', b('重新开始'), '（同样的设置开一局新地图）和', b('退出到首页'), '。'), li('共 3 个存档位，保存当时的全部进度，包括下到一半的回合和电脑玩家的回合。'), li('首页的“加载存档”可以接着任意一份继续。'), li('存档只保存在这台电脑的这个浏览器里，清除浏览器数据会一并删除。')),
+      h(
+        'ul',
+        {},
+        touch ? li('顶栏的', b('菜单'), '：暂停游戏并弹出菜单，点', b('继续游戏'), '接着玩。') : li(b('Esc'), '或顶栏的“菜单”：暂停游戏并弹出菜单，再按一次继续。'),
+        li('菜单里可以', b('看玩法'), '（就是这一页）、', b('保存存档'), '、', b('重新开始'), '（同样的设置开一局新地图）和', b('退出到首页'), '。'),
+        li('共 3 个存档位，保存当时的全部进度，包括下到一半的回合和电脑玩家的回合。'),
+        li('首页的“加载存档”可以接着任意一份继续。'),
+        li(touch ? '存档只保存在这台设备里（App 版在这个 App 里，网页版在这个浏览器里），删除 App 或清除浏览器数据会一并删除。' : '存档只保存在这台电脑的这个浏览器里，清除浏览器数据会一并删除。'),
+      ),
     ),
     section('建筑与消耗', false, ...buildingRows),
     section('单位与消耗', false, ...unitRows),
+  );
+}
+
+/** The "操作" section for a mouse and a keyboard. */
+function ordersByHand(): HTMLElement {
+  return h(
+    'ul',
+    {},
+    li('左键：选择单位 / 建筑下达命令；点击空地查看地块。'),
+    li('拖动：旋转视角；滚轮：缩放；', b('按住空格拖动'), '或右键拖动：平移地图。'),
+    li(b('点击左上角小地图'), '：回到全局视角。'),
+    li('右键：取消选择，或放弃放置建筑。'),
+    li('Tab：下一个待命单位；E：结束回合；1 / 2 / 3：切换右侧栏的建造 / 生产 / 建筑页。'),
+  );
+}
+
+/** The "操作" section for a tablet tapped with fingers: nothing hovers, and there is no wheel, no right button and no keys. */
+function ordersByFinger(): HTMLElement {
+  return h(
+    'ul',
+    {},
+    li('点击：选择单位 / 建筑下达命令；点击空地查看地块，或取消选择。'),
+    li('单指拖动：旋转视角；双指捏合：缩放；双指拖动：平移地图。'),
+    li(b('点击左上角小地图'), '：回到全局视角。'),
+    li('放置建筑：先点一下格子看位置，再点一次确认；点', b('取消'), '放弃。'),
+    li(b('下一个待命'), '：下一个待命单位；点', b('结束回合'), '结束回合；右侧栏顶部的页签切换建造 / 生产 / 建筑。'),
   );
 }

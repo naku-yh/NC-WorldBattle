@@ -23,6 +23,13 @@ export const wait = (ms: number): Promise<void> => new Promise((resolve) => setT
 /** 1234 -> "1,234". */
 export const fmt = (n: number): string => Math.round(n).toLocaleString('en-US');
 
+/**
+ * True where nothing that can hover is attached, as on a tablet held in two
+ * hands. There is then no wheel, no right button and usually no keyboard, so
+ * the help says how to do things by hand rather than by key.
+ */
+export const touchOnly = (): boolean => typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches;
+
 /** Lets a glass panel's highlight follow the pointer across it. */
 export function sheen(el: HTMLElement): void {
   el.addEventListener('pointermove', (e) => {
