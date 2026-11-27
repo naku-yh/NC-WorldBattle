@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NC WorldBattle</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene"></canvas>
+      <div id="floaters"></div>
+      <div id="home"></div>
+      <div id="hud" class="hidden">
+        <header id="topbar"></header>
+        <aside id="sidebar"></aside>
+        <canvas id="minimap" title="点击回到全局视角"></canvas>
+        <div id="scores"></div>
+        <div id="log"></div>
+        <div id="unitcard"></div>
+      </div>
+      <div id="overlay"></div>
+      <div id="toast"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
