@@ -553,6 +553,21 @@ button {
   margin-left: auto;
 }
 
+/* The producer that was just clicked on the board: its line is lit, and flashes as the list scrolls to it. */
+.group.focus {
+  color: var(--accent);
+  border-radius: 8px;
+}
+
+.group.focus.flash {
+  animation: line-in 1.6s ease-out both;
+}
+
+.group.focus .icon {
+  box-shadow: 0 0 0 2px var(--accent);
+  border-radius: 6px;
+}
+
 .harvest {
   display: flex;
   flex-direction: column;
@@ -618,6 +633,51 @@ button {
   font-weight: 800;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- gathering panel ---------- */
+/* Its own panel beside the sidebar, up only while the player has an action
+   point: read what a unit costs on the right, pick a resource on the left. */
+#harvest {
+  position: fixed;
+  top: 62px;
+  right: 368px;
+  width: 248px;
+  z-index: 4;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 44px rgba(0, 0, 0, 0.45);
+  animation: panel-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.hp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 10px;
+  font-size: 16px;
+}
+
+.hp-head b {
+  font-weight: 700;
+}
+
+.hp-head small {
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+#harvest .harvest button {
+  padding: 9px 12px;
+}
+
+#harvest .hint {
+  margin: 8px 2px 0;
 }
 
 .side-foot {
@@ -695,18 +755,33 @@ button {
   max-width: calc(100vw - 400px);
 }
 
+/* The card of whatever is selected or looked at: its picture, then its name with its labels, its figures, and under them the rest. */
 .card {
   pointer-events: auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
-  padding: 8px 12px;
+  padding: 10px 14px 10px 10px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   backdrop-filter: blur(14px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-  white-space: nowrap;
+  white-space: normal;
+}
+
+.card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.card .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .card .title {
@@ -716,19 +791,116 @@ button {
   gap: 6px;
 }
 
+.card .tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* The figures: a row of cells and then the number, two to a row. A grid keeps the cells of the row
+   below under those of the row above, so the eye can run down a column and compare. */
+.meters {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 4px 22px;
+}
+
+.meters.one {
+  grid-template-columns: auto;
+}
+
+.meter {
+  display: grid;
+  grid-template-columns: 2.2em auto minmax(3.8em, auto);
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.mlabel {
+  color: var(--muted);
+}
+
+.cells {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.cells i {
+  width: 8px;
+  height: 13px;
+  border-radius: 2px;
+  /* The unit's own. */
+  background: #bfdbfe;
+}
+
+/* What the ground adds on top of that. */
+.cells i.up {
+  background: #fbbf24;
+}
+
+/* What the ground takes off: a gap where the cell would have been. */
+.cells i.down {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px #f87171;
+}
+
+/* Room the figure never reaches. */
+.cells i.void,
+.cells i.off {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* Health: green while there is plenty, amber, then red. */
+.cells i.hp {
+  background: #4ade80;
+}
+
+.cells i.hp.warn {
+  background: #facc15;
+}
+
+.cells i.hp.low {
+  background: #f87171;
+}
+
+.mvalue {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .card .stats {
   display: flex;
   gap: 10px;
   color: var(--muted);
   font-size: 12px;
+  flex-wrap: wrap;
 }
 
-.card .stats span {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+/* Under the figures: the ground under its feet, how to command it, and the way out. */
+.card-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
 }
 
+.card-foot .notes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+
+.card .terrain,
 .card .help {
   color: var(--muted);
   font-size: 12px;
@@ -871,9 +1043,64 @@ button {
   margin-bottom: 6px;
 }
 
-.seat .who {
+/* A seat's name, typed where it is shown. */
+.seat .seat-name {
   flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font: inherit;
   font-weight: 600;
+}
+
+.seat .seat-name:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(245, 184, 61, 0.18);
+}
+
+/* The colours a seat may take. */
+.swatches {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.swatches .sw {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  background: var(--c);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.25);
+}
+
+.swatches .sw.on {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+
+.setup-row {
+  display: flex;
+  gap: 26px;
+  align-items: flex-start;
+}
+
+.setup-row > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-row .seg {
+  max-width: 100%;
+}
+
+.setup-row .seg button {
+  white-space: nowrap;
 }
 
 .stepper {
@@ -906,14 +1133,59 @@ button {
   margin-top: 22px;
 }
 
+/* The small print above the buttons. */
+.setup-hint {
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* All three ways on are the same size, whatever their label weighs. */
+.setup-foot .btn,
 .setup-foot .btn.primary {
-  padding: 11px 28px;
-  font-size: 16px;
+  flex: none;
+  width: 148px;
+  height: 48px;
+  padding: 0;
+  font-size: 15px;
+  text-align: center;
 }
 
 .summary {
   color: var(--muted);
   font-size: 13px;
+}
+
+.rules-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(500px, 92vw);
+  padding: 24px 26px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  background: linear-gradient(180deg, rgba(27, 38, 63, 0.93), rgba(12, 18, 31, 0.95));
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: -30px 0 70px rgba(0, 0, 0, 0.55);
+  transform: translateX(100%);
+  transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+  z-index: 2;
+}
+
+.rules-drawer.open {
+  transform: none;
+}
+
+.rules-drawer h2 {
+  margin: 0 0 12px;
+  font-size: 20px;
+}
+
+.rules-drawer .rules {
+  margin-top: 0;
 }
 
 details {
@@ -1351,22 +1623,6 @@ summary {
   height: 26px;
 }
 
-/* the ground something stands on, under its numbers */
-.card {
-  flex-wrap: wrap;
-  white-space: normal;
-}
-
-.card .stats {
-  flex-wrap: wrap;
-}
-
-.card .terrain {
-  color: var(--muted);
-  font-size: 12px;
-  margin-top: 2px;
-}
-
 /* ---------- choosing where a building goes ---------- */
 .placing {
   display: flex;
@@ -1660,9 +1916,33 @@ kbd.gbtn-hint {
 
 /* ---------- pause menu & load panel ---------- */
 /* A sheet of the glass with something written on it. */
-.card {
+.menu-card {
   width: min(440px, calc(100vw - 32px));
   animation: glass-in 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
+  transition: width 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The rulebook has tables and fold-outs in it: a wider pane than the list of buttons. */
+.menu-card.wide {
+  width: min(720px, calc(100vw - 32px));
+}
+
+/* The rulebook on the back of the pause menu: dense small print, so it sits on a darker pane of its own. */
+.rules-sheet {
+  padding: 12px 16px;
+  border-radius: 20px;
+  background: rgba(8, 12, 22, 0.64);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.rules-sheet .rules-panel .rule summary {
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+.rules-sheet .rules-panel .rule-body {
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 /* The writing. It scrolls on a short screen, so the rim of the glass stays where it is. */
@@ -2070,22 +2350,35 @@ kbd.gbtn-hint {
   white-space: nowrap;
 }
 
-.home-mark b {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  background: var(--accent);
-  color: #1a1205;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0;
-  clip-path: polygon(30% 0, 100% 0, 100% 70%, 70% 100%, 0 100%, 0 30%);
+/* What this build is, beside the picture it goes by. */
+.home-version {
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.home-mark span {
-  color: var(--text);
-  font-weight: 600;
+/* The picture the whole game goes by: it breathes, and glows a little as it does. */
+.home-logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  animation: logo-breathe 3.8s ease-in-out infinite;
+}
+
+@keyframes logo-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 7px rgba(125, 211, 252, 0.3));
+  }
+
+  50% {
+    transform: scale(1.07);
+    filter: drop-shadow(0 0 16px rgba(125, 211, 252, 0.6));
+  }
 }
 
 .home-pulse {
@@ -2529,6 +2822,19 @@ kbd.gbtn-hint {
   }
 }
 
+@keyframes line-in {
+  from {
+    background: rgba(245, 184, 61, 0.3);
+  }
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
 @keyframes swap {
   from {
     opacity: 0;
@@ -2594,8 +2900,24 @@ kbd.gbtn-hint {
     max-width: calc(100vw - 24px);
   }
 
+  .meters {
+    grid-template-columns: auto;
+  }
+
+  /* Narrow screens: the sidebar lies along the bottom, so the panel goes top right, under the bar. */
+  #harvest {
+    top: 58px;
+    right: 8px;
+    width: 204px;
+  }
+
   .dialog {
     padding: 20px 18px;
+  }
+
+  .setup-row {
+    flex-direction: column;
+    gap: 0;
   }
 
   .home-top {
@@ -2659,7 +2981,8 @@ kbd.gbtn-hint {
 
 @media (prefers-reduced-motion: reduce) {
   .home-title span,
-  .home-pulse {
+  .home-pulse,
+  .home-logo {
     animation: none;
   }
 
@@ -2668,7 +2991,7 @@ kbd.gbtn-hint {
   .home-stage.enter .home-foot,
   .home-stage.enter .home-corner,
   .home-stage.enter .home-ticks,
-  .card,
+  .menu-card,
   .pause-body.swap,
   .slot-done {
     animation-duration: 0.01s;

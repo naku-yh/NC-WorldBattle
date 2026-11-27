@@ -75,17 +75,24 @@ const UNIT_ART: Record<UnitKey, string> = {
 
 const gunBase = `<rect x="2.5" y="16.5" width="19" height="5" rx="2.5" fill="${GUN}"/>`;
 
-/** The force-field shield; level 2 gets a gilt edge and a star. */
-function shield(level: 1 | 2): string {
+/** One small star, centred on (12, `cy`). */
+const star = (cy: number, r = 1): string =>
+  `<path d="M12 7.6l1.3 2.6 2.9.4-2.1 2 .5 2.9-2.6-1.4-2.6 1.4.5-2.9-2.1-2 2.9-.4z" fill="${AMBER}" transform="translate(12 ${cy}) scale(${r}) translate(-12 -11.6)"/>`;
+
+/**
+ * The force-field shield. Every rung of the net past the first marks it
+ * further: a bright rim, then a gilt edge, then one star and then two.
+ */
+function shield(level: number): string {
   const outline = 'M12 1.6 3.2 5.2v6.3c0 5.4 3.8 9.4 8.8 11.3 5-1.9 8.8-5.9 8.8-11.3V5.2z';
   const grid = `<path d="M12 1.6v21.2M4.8 8.4h14.4M5.4 13.6h13.2M8.2 4.9v15M15.8 4.9v15" stroke="#bfdbfe" stroke-width="0.9" opacity="0.75" fill="none"/>`;
-  const star = `<path d="M12 7.6l1.3 2.6 2.9.4-2.1 2 .5 2.9-2.6-1.4-2.6 1.4.5-2.9-2.1-2 2.9-.4z" fill="${AMBER}"/>`;
-  return level === 2
-    ? `<path d="${outline}" fill="#3b82f6"/><path d="${outline}" fill="none" stroke="${AMBER}" stroke-width="1.7"/>${grid}${star}`
-    : `<path d="${outline}" fill="#2563eb" opacity="0.92"/>${grid}`;
+  const rim = level >= 2 ? `<path d="${outline}" fill="none" stroke="#93c5fd" stroke-width="1.3"/>` : '';
+  const gilt = level >= 3 ? `<path d="${outline}" fill="none" stroke="${AMBER}" stroke-width="1.7"/>` : '';
+  const marks = level >= 5 ? star(8.9, 0.62) + star(14.4, 0.62) : level >= 4 ? star(11.6) : '';
+  return `<path d="${outline}" fill="#2563eb" opacity="0.92"/>${grid}${marks}${rim}${gilt}`;
 }
 
-const BUILDING_ART: Record<Exclude<BuildingKey, 'defenseNet'>, (level: 1 | 2) => string> = {
+const BUILDING_ART: Record<Exclude<BuildingKey, 'defenseNet'>, (level: number) => string> = {
   hq: () => `<rect x="1.5" y="12.5" width="21" height="9" rx="1.4" fill="${STEEL_D}"/><path d="M5.5 12.5a6.5 6.5 0 0 1 13 0z" fill="${STEEL}"/><path d="M12 7.6l.9 1.8 2 .3-1.5 1.4.4 2-1.8-1-1.8 1 .4-2-1.5-1.4 2-.3z" fill="${AMBER}"/><rect x="10" y="15.2" width="4" height="6.3" rx="0.7" fill="${DOOR}"/><rect x="11.6" y="1.6" width="0.9" height="6.4" fill="${GLASS}"/><path d="M12.5 1.9h6v3.6h-6z" fill="${AMBER}"/><rect x="3" y="14.4" width="3.2" height="2.2" rx="0.4" fill="${CYAN}"/><rect x="17.8" y="14.4" width="3.2" height="2.2" rx="0.4" fill="${CYAN}"/>`,
   powerPlant: () => `<rect x="1.5" y="10.5" width="11.5" height="11" rx="1.4" fill="${STEEL_D}"/><path d="M13.6 21.5c-1.3-4.2-1.3-9.3.2-13.6h5.5c1.5 4.3 1.5 9.4.2 13.6z" fill="${STEEL}"/><ellipse cx="16.6" cy="7.9" rx="2.9" ry="0.9" fill="${GLASS}"/><path d="M8.8 11.6 4.8 17.4h2.8l-1.3 4.8 4.3-5.9H7.9z" fill="${AMBER}"/><rect x="2.8" y="12.6" width="3" height="2.4" rx="0.4" fill="${CYAN}"/>`,
   factory: () => `<path d="M1.5 21.5V10l6 3.6V10l6 3.6V6.5h9v15z" fill="${STEEL_D}"/><path d="M13.5 6.5h9v3h-9z" fill="${STEEL}"/><rect x="2.8" y="15.8" width="3.6" height="5.7" rx="0.5" fill="${DOOR}"/><rect x="8.4" y="15.8" width="3.2" height="2.8" rx="0.4" fill="${CYAN}"/><rect x="14.6" y="12.2" width="2.6" height="2.6" rx="0.4" fill="${CYAN}"/><rect x="18.4" y="12.2" width="2.6" height="2.6" rx="0.4" fill="${CYAN}"/>`,
@@ -131,7 +138,7 @@ export function unitIcon(key: UnitKey): string {
   return svg(UNIT_ART[key]);
 }
 
-export function buildingIcon(key: BuildingKey, level: 1 | 2 = 1): string {
+export function buildingIcon(key: BuildingKey, level = 1): string {
   return svg(key === 'defenseNet' ? shield(level) : BUILDING_ART[key](level));
 }
 
@@ -160,7 +167,7 @@ export function terrainIcon(kind: Terrain): string {
 // Line drawings for the menus, in `currentColor`.
 // ---------------------------------------------------------------------------
 
-export type Glyph = 'play' | 'save' | 'load' | 'restart' | 'quit' | 'back' | 'next' | 'trash' | 'menu' | 'check' | 'home';
+export type Glyph = 'play' | 'save' | 'load' | 'restart' | 'quit' | 'back' | 'next' | 'trash' | 'menu' | 'check' | 'home' | 'book';
 
 const GLYPHS: Record<Glyph, string> = {
   play: '<path d="M8 5.8v12.4a.6.6 0 0 0 .92.5l9.6-6.2a.6.6 0 0 0 0-1l-9.6-6.2A.6.6 0 0 0 8 5.8z"/>',
@@ -174,6 +181,8 @@ const GLYPHS: Record<Glyph, string> = {
   menu: '<path d="M5 7h14M5 12h14M5 17h14"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   home: '<path d="M4 11l8-6.5 8 6.5"/><path d="M6 9.5V19a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9.5"/><path d="M10 20v-5.5h4V20"/>',
+  // An open book, seen from above the spine.
+  book: '<path d="M12 6.2C10.6 4.9 8.3 4.3 4.5 4.5v14.2c3.8-.2 6.1.4 7.5 1.7 1.4-1.3 3.7-1.9 7.5-1.7V4.5c-3.8-.2-6.1.4-7.5 1.7z"/><path d="M12 6.2v14.2"/>',
 };
 
 /** A line drawing for a menu button. */

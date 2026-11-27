@@ -1,12 +1,13 @@
 import { ALIENS, BUILDABLE, BUILDINGS, HARVEST_YIELD, PRODUCED_UNITS, RESOURCES, SCORE_LAST_HIT, SCORE_SPIDER, SPIDERLING, TERRAIN, TRUCKS_PER_FACTORY, UNITS } from '../game/data';
-import { alienById, attackPower, buildingById, canBuild, canProduce, canUpgrade, countBuilding, hqOf, netDefense, spiderById, statsOf, unitById } from '../game/engine';
+import { alienById, attackPower, buildingById, canBuild, canProduce, canUpgrade, countBuilding, hqOf, netDefense, nextLevelOf, spiderById, statsOf, unitById } from '../game/engine';
 import { terrainAt, zoneSize } from '../game/board';
 import type { BuildingKey, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Resources, TerrainDef, TerrainEffect, UnitFamily, UnitKey } from '../game/types';
 import { fmt, h } from './dom';
 import { alienIcon, buildingIcon, glyph, icon, iconBox, spiderIcon, terrainIcon, unitIcon, type IconName } from './icons';
-import { costText, effectOf, rulesPanel } from './rules';
+import { costText, effectOf } from './rules';
 
-export type Tab = 'harvest' | 'build' | 'produce' | 'structures' | 'rules';
+/** The sidebar's pages. Gathering and the rulebook have left it: gathering has a panel of its own, the rules live in the pause menu. */
+export type Tab = 'build' | 'produce' | 'structures';
 export interface Sel {
   kind: 'unit' | 'building';
   id: number;
@@ -20,6 +21,10 @@ export interface HudCtx {
   tile: Pt | null;
   /** The building the player is choosing a spot for. */
   placing: BuildingKey | null;
+  /** A producer of the player's own that is being looked at: its line on the "生产" page is lit, and scrolled to the first time. */
+  focusProducer: BuildingKey | null;
+  /** Only on the render that follows the click: after that the page keeps the place the player scrolled to. */
+  scrollProducer: boolean;
   humanTurn: boolean;
   speed: number;
 }
@@ -40,13 +45,13 @@ export interface HudActions {
 }
 
 const TABS: Array<[Tab, string]> = [
-  ['harvest', '采集'],
   ['build', '建造'],
   ['produce', '生产'],
   ['structures', '建筑'],
-  ['rules', '玩法'],
 ];
 const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
+/** The buildings whose units the "生产" page lists, in the data's order. */
+const PRODUCERS = Object.keys(PRODUCED_UNITS) as Array<keyof typeof PRODUCED_UNITS>;
 
 const ico = (name: IconName, color?: string): HTMLElement => h('span', { class: 'ico', html: icon(name), style: color ? `color:${color}` : '' });
 
@@ -60,15 +65,67 @@ function costChips(cost: Cost, have: Resources): HTMLElement {
   return w;
 }
 
-/** "攻 8" style labelled value; clearer than a row of tiny icons. */
+/** "攻 8" style labelled value: for the lists, and for a tile. */
 function stat(label: string, text: string): HTMLElement {
   return h('span', { class: 'stat-chip' }, h('i', {}, label), text);
 }
 
-/** A stat as it stands, with the terrain's share spelt out when there is one: "攻 10 (+2)". */
-function tuned(label: string, base: number, value: number, suffix = ''): HTMLElement {
-  if (base === value) return stat(label, `${value}${suffix}`);
-  return stat(label, `${value}${suffix}（${value > base ? '+' : '−'}${Math.abs(value - base)}）`);
+/** "+2" or "−2". */
+const signed = (n: number): string => (n > 0 ? `+${n}` : `−${Math.abs(n)}`);
+
+/** How many cells each figure's row has: the most it reaches on any unit or alien, so that every row of a kind is as long as every other and two cards line up. */
+const ROOM = { health: 12, attack: 16, defense: 10, range: 6 };
+
+/** One figure of a card: a row of cells, then the number. */
+interface Meter {
+  label: string;
+  /** The figure off the reference card. */
+  base: number;
+  /** The figure as it stands. */
+  value: number;
+  room: number;
+  /** The number written after the cells. */
+  text: string;
+  /** For the pointer: where the difference from the reference card comes from. */
+  note?: string;
+  /** Health is a share of a whole rather than a count of points: its cells show how full it is. */
+  share?: true;
+}
+
+/**
+ * A figure counted in points. The cells up to the reference card are the unit's own;
+ * anything the ground adds on top of that carries on after them in another colour, and
+ * anything the ground takes off is left as a gap where it would have been.
+ */
+function points(label: string, base: number, value: number, room: number, suffix = '', shown?: string): Meter {
+  const text = shown ?? `${value}${suffix}${base === value ? '' : `(${signed(value - base)})`}`;
+  return { label, base, value, room, text, ...(base === value || shown ? {} : { note: `${label} ${base}，地形 ${signed(value - base)}` }) };
+}
+
+/** Health, as a row of cells filled to the share of it that is left. */
+function health(hp: number, max: number): Meter {
+  return { label: '生命', base: max, value: hp, room: ROOM.health, text: `${hp}/${max}`, share: true };
+}
+
+/** A figure as it is drawn: its cells, then its number. */
+function meterEl(m: Meter): HTMLElement {
+  const cells = h('span', { class: 'cells' });
+  // Health has no whole number of cells to show: fill as many as the share left comes to, never none while there is any left.
+  const filled = m.share ? Math.max(m.value > 0 ? 1 : 0, Math.round((m.value / m.base) * m.room)) : m.value;
+  for (let i = 1; i <= m.room; i++) {
+    let kind = 'void';
+    if (m.share) kind = i > filled ? 'off' : `hp${m.value / m.base > 0.55 ? '' : m.value / m.base > 0.28 ? ' warn' : ' low'}`;
+    else if (i <= m.value) kind = i > m.base ? 'up' : '';
+    else if (i <= m.base) kind = 'down';
+    cells.append(h('i', { class: kind }));
+  }
+  return h('div', { class: 'meter', title: m.note ?? '' }, h('span', { class: 'mlabel' }, m.label), cells, h('b', { class: 'mvalue' }, m.text));
+}
+
+/** The figures of one card, a row at a time: two to a row, so that life sits over defence and attack over range. */
+function metersEl(rows: Meter[][]): HTMLElement {
+  const single = rows.length === 1 || rows[0].length === 1;
+  return h('div', { class: single ? 'meters one' : 'meters' }, ...rows.flat().map(meterEl));
 }
 
 function unitStats(uk: UnitKey): HTMLElement[] {
@@ -95,15 +152,16 @@ interface Described {
   color: string;
   title: string;
   art: string;
+  /** The small labels after the name: what it is, and what it can still do this turn. */
   tags: HTMLElement[];
+  /** Its figures as rows of cells. */
+  meters?: Meter[][];
+  /** What cannot be counted in cells, in words. */
   stats: HTMLElement[];
   /** The ground a unit stands on and what it does for it. */
   terrain: HTMLElement | null;
   help: string;
 }
-
-/** "+2" or "−2". */
-const signed = (n: number): string => (n > 0 ? `+${n}` : `−${Math.abs(n)}`);
 
 /** The ground a unit stands on, and what it does for that unit in particular. */
 function groundText(ground: TerrainDef, family: UnitFamily): string {
@@ -171,7 +229,11 @@ function describeBeast(s: GameState, ref: EntityRef): Described | null {
       title: `外星人 ${SPIDERLING.name}`,
       art: spiderIcon(),
       tags: [h('span', { class: 'tag warn' }, `${ALIENS.kuide.name}孵化的`)],
-      stats: [stat('攻击', String(SPIDERLING.attack)), stat('防御', String(SPIDERLING.defense)), stat('生命', String(SPIDERLING.hp))],
+      meters: [
+        [health(SPIDERLING.hp, SPIDERLING.hp), points('攻击', SPIDERLING.attack, SPIDERLING.attack, ROOM.attack)],
+        [points('防御', SPIDERLING.defense, SPIDERLING.defense, ROOM.defense)],
+      ],
+      stats: [],
       terrain: null,
       help: `会随机攻击够得着的目标。踩死它得 ${SCORE_SPIDER} 积分和一点资源。`,
     };
@@ -184,7 +246,11 @@ function describeBeast(s: GameState, ref: EntityRef): Described | null {
     title: `外星人 ${d.name} · ${d.look}`,
     art: alienIcon(a.key),
     tags: [h('span', { class: 'tag warn' }, `第 ${a.arrived} 回合降临`)],
-    stats: [stat('攻击', String(d.attack)), stat('防御', String(d.defense)), stat('生命', `${a.hp}/${d.hp}`), d.teleports ? stat('移动', '瞬移') : stat('射程', String(d.range))],
+    meters: [
+      [health(a.hp, d.hp), points('攻击', d.attack, d.attack, ROOM.attack, d.shots > 1 ? `×${d.shots}` : '')],
+      [points('防御', d.defense, d.defense, ROOM.defense), points('射程', d.range, d.range, ROOM.range)],
+    ],
+    stats: [stat('移动', d.teleports ? '瞬移' : String(d.move))],
     terrain: null,
     help: `${d.desc} 击败可得 ${costText(d.reward)}；积分 ${d.bounty} 按伤害分配，最后一击另加 ${SCORE_LAST_HIT}。`,
   };
@@ -207,8 +273,16 @@ function describe(s: GameState, ref: EntityRef, mine: boolean): Described | null
       color: hit.owner.color,
       title: `${d.name} · ${hit.owner.name}`,
       art: unitIcon(hit.unit.key),
-      tags: [...unitTags(hit.unit.key), ...tags],
-      stats: d.attack > 0 ? [stat('生命', `${hit.unit.hp}/${d.hp}`), tuned('攻', d.attack, st.attack, d.shots > 1 ? `×${d.shots}` : ''), tuned('防', d.defense, st.defense), tuned('射程', d.range, st.range)] : [stat('生命', '—'), stat('作用', '每台每次采集 100 资源')],
+      // What it can still do this turn comes first; what it is comes after.
+      tags: [...tags, ...unitTags(hit.unit.key)],
+      meters:
+        d.attack > 0
+          ? [
+              [health(hit.unit.hp, d.hp), points('攻击', d.attack, st.attack, ROOM.attack, d.shots > 1 ? `×${d.shots}` : '')],
+              [points('防御', d.defense, st.defense, ROOM.defense), points('射程', d.range, st.range, ROOM.range)],
+            ]
+          : undefined,
+      stats: d.attack > 0 ? [] : [stat('作用', '每台每次采集 100 资源')],
       terrain: h('span', { class: 'terrain', title: ground.rule }, `地形 ${groundText(ground, d.family)}`),
       help: mine ? '点击蓝色格子移动，点击红色目标攻击。' : '',
     };
@@ -219,15 +293,25 @@ function describe(s: GameState, ref: EntityRef, mine: boolean): Described | null
   const lv = d.levels[hit.building.level - 1];
   const tags: HTMLElement[] = [];
   if (d.needsPower && !hit.building.powered) tags.push(h('span', { class: 'tag warn' }, '断电'));
-  if (mine && lv.attack > 0) tags.push(h('span', { class: hit.building.fired ? 'tag' : 'tag good' }, hit.building.fired ? '本回合已开火' : '可以开火'));
-  const stats = hit.building.key === 'defenseNet' ? [stat('基地防御', `+${lv.defense}`)] : [stat('生命', `${hit.building.hp}/${hit.building.maxHp}`)];
-  if (lv.attack > 0) stats.push(stat('攻击', String(lv.attack)), stat('射程', String(lv.range)), stat('目标', d.canHit.includes('air') ? (d.canHit.includes('ground') ? '地面与空中' : '仅空中') : '仅地面'));
+  const armed = lv.attack > 0;
+  if (mine && armed) tags.push(h('span', { class: hit.building.fired ? 'tag' : 'tag good' }, hit.building.fired ? '本回合已开火' : '可以开火'));
+  if (armed) tags.push(h('span', { class: 'tag' }, d.canHit.includes('ground') ? (d.canHit.includes('air') ? '地面与空中都打' : '只打地面') : '只打空中'));
+  const net = hit.building.key === 'defenseNet';
+  const life = health(hit.building.hp, hit.building.maxHp);
   return {
     color: hit.owner.color,
     title: `${lv.name} · ${hit.owner.name}`,
     art: buildingIcon(hit.building.key, hit.building.level),
     tags,
-    stats,
+    meters: net
+      ? [[points('基地防御', lv.defense, lv.defense, ROOM.defense, '', `+${lv.defense}`)]]
+      : armed
+        ? [
+            [life, points('攻击', lv.attack, lv.attack, ROOM.attack)],
+            [points('射程', lv.range, lv.range, ROOM.range)],
+          ]
+        : [[life]],
+    stats: [],
     terrain: null,
     help: mine && lv.attack > 0 ? '点击射程内的红色目标开火。' : '',
   };
@@ -240,14 +324,59 @@ export class Hud {
     private side: HTMLElement,
     private logEl: HTMLElement,
     private cardEl: HTMLElement,
+    /** The gathering panel, which stands beside the sidebar only while the player has an action point to spend. */
+    private harvestEl: HTMLElement,
     private a: HudActions,
   ) {}
 
-  render(s: GameState, ctx: HudCtx): void {
+  /** Says whether the gathering panel is up, so the picture can make room for it. */
+  render(s: GameState, ctx: HudCtx): boolean {
     this.topbar(s, ctx);
     this.sidebar(s, ctx);
     this.log(s);
     this.card(s, ctx);
+    return this.harvest(s, ctx);
+  }
+
+  /**
+   * Gathering, on its own beside the sidebar: the player reads what a unit
+   * costs on one side and picks a resource to fetch on the other. It is only
+   * put up for a human player with an action point to spend; nobody else can gather.
+   */
+  private harvest(s: GameState, ctx: HudCtx): boolean {
+    const el = this.harvestEl;
+    const p = s.phase === 'player' ? s.players[s.currentPlayer] : null;
+    const up = ctx.humanTurn && !!p && p.ap > 0;
+    el.classList.toggle('hidden', !up);
+    if (!up || !p) return false;
+    const per = HARVEST_YIELD * p.trucks;
+    const why = p.trucks < 1 ? '没有运输车：先在加工工厂生产一台' : '';
+    el.replaceChildren(
+      h(
+        'div',
+        { class: 'hp-head' },
+        h('b', {}, '采集'),
+        h('span', { class: 'pips', title: `行动点 ${p.ap}` }, ...[0, 1, 2].map((i) => h('i', { class: i < p.ap ? 'on' : '' }))),
+        h('small', {}, `行动点 ${p.ap}`),
+      ),
+      h(
+        'div',
+        { class: 'harvest' },
+        ...RES_KEYS.map((k) => {
+          const b = h(
+            'button',
+            { disabled: p.trucks < 1, title: why || `花 1 行动点采集${RESOURCES[k].name}` },
+            h('span', { class: 'ico', style: `color:${RESOURCES[k].color}`, html: icon(k) }),
+            h('span', { class: 'lbl' }, h('b', {}, RESOURCES[k].name), h('small', {}, `现有 ${fmt(p.resources[k])}`)),
+            h('span', { class: 'gain' }, `+${fmt(per)}`),
+          );
+          b.onclick = () => this.a.harvest(k);
+          return b;
+        }),
+      ),
+      h('p', { class: 'hint' }, why || `每点行动点：${p.trucks} 台运输车全部出动，每台运回 ${HARVEST_YIELD}`),
+    );
+    return true;
   }
 
   private topbar(s: GameState, ctx: HudCtx): void {
@@ -285,7 +414,7 @@ export class Hud {
     speed.onclick = this.a.toggleSpeed;
     const home = h('button', { class: 'btn small ghost', title: '把镜头移回能看见整张地图的角度' }, '全局视角');
     home.onclick = this.a.overview;
-    const rules = h('button', { class: 'btn small ghost', title: '右侧栏的“玩法”页' }, '玩法说明');
+    const rules = h('button', { class: 'btn small ghost', title: '暂停游戏并打开玩法说明（Esc 菜单里也有）' }, '玩法说明');
     rules.onclick = this.a.showRules;
     // Saving, starting over and leaving all live behind this one button.
     const menu = h('button', { class: 'btn small ghost', title: '暂停游戏：保存、重新开始或退出（Esc）' }, h('span', { class: 'btn-ico', html: glyph('menu') }), '菜单', h('kbd', {}, 'Esc'));
@@ -297,57 +426,52 @@ export class Hud {
     const el = this.side;
     const prevScroll = el.querySelector('.side-scroll')?.scrollTop ?? 0;
     el.replaceChildren();
-    const rules = ctx.tab === 'rules';
     const p = s.phase === 'player' ? s.players[s.currentPlayer] : null;
-    if (!p && !rules) {
+    if (!p) {
       el.append(h('div', { class: 'side-empty' }, s.phase === 'gameover' ? '对局已结束' : s.phase === 'aliens' ? '外星人正在行动…' : '掷骰子决定行动点…'));
       return;
     }
     const mine = ctx.humanTurn;
-    if (p) {
-      const hq = hqOf(p);
-      const dark = p.buildings.filter((b) => !b.powered).length;
-      const hp = hq?.hp ?? 0;
-      const maxHp = hq?.maxHp ?? 20;
-      const net = netDefense(p);
-      el.append(
+    const hq = hqOf(p);
+    const dark = p.buildings.filter((b) => !b.powered).length;
+    const hp = hq?.hp ?? 0;
+    const maxHp = hq?.maxHp ?? 20;
+    const net = netDefense(p);
+    el.append(
+      h(
+        'div',
+        { class: 'side-head' },
+        h('span', { class: 'dot', style: `--c:${p.color}` }),
+        h('span', { class: 'who' }, `${p.name} `, h('span', { class: `tag${p.kind === 'human' ? ' good' : ''}` }, p.kind === 'human' ? '人类' : '电脑')),
+        h('span', { class: 'pips', title: `行动点 ${p.ap}` }, ...[0, 1, 2].map((i) => h('i', { class: i < p.ap ? 'on' : '' }))),
+      ),
+      h(
+        'div',
+        { class: 'side-stats' },
         h(
           'div',
-          { class: 'side-head' },
-          h('span', { class: 'dot', style: `--c:${p.color}` }),
-          h('span', { class: 'who' }, `${p.name} `, h('span', { class: `tag${p.kind === 'human' ? ' good' : ''}` }, p.kind === 'human' ? '人类' : '电脑')),
-          h('span', { class: 'pips', title: `行动点 ${p.ap}` }, ...[0, 1, 2].map((i) => h('i', { class: i < p.ap ? 'on' : '' }))),
+          { class: 'stat' },
+          h('label', {}, ico('hp'), '基地生命'),
+          h('b', {}, `${hp} / ${maxHp}`),
+          h('div', { class: 'hpbar' }, h('i', { class: hp / maxHp < 0.35 ? 'low' : '', style: `width:${Math.max(0, (hp / maxHp) * 100)}%` })),
         ),
+        h('div', { class: 'stat', title: '基地内所有建筑每次受击抵扣的攻击力' }, h('label', {}, ico('def'), '防御网'), h('b', {}, net > 0 ? `+${net}` : '无')),
+        h('div', { class: 'stat', title: '存活战斗单位与通电防御建筑的攻击力总和，生命值相同时据此决胜' }, h('label', {}, ico('atk'), '攻击力'), h('b', {}, String(attackPower(p)))),
         h(
           'div',
-          { class: 'side-stats' },
-          h(
-            'div',
-            { class: 'stat' },
-            h('label', {}, ico('hp'), '基地生命'),
-            h('b', {}, `${hp} / ${maxHp}`),
-            h('div', { class: 'hpbar' }, h('i', { class: hp / maxHp < 0.35 ? 'low' : '', style: `width:${Math.max(0, (hp / maxHp) * 100)}%` })),
-          ),
-          h('div', { class: 'stat', title: '基地内所有建筑每次受击抵扣的攻击力' }, h('label', {}, ico('def'), '防御网'), h('b', {}, net > 0 ? `+${net}` : '无')),
-          h('div', { class: 'stat', title: '存活战斗单位与通电防御建筑的攻击力总和，生命值相同时据此决胜' }, h('label', {}, ico('atk'), '攻击力'), h('b', {}, String(attackPower(p)))),
-          h(
-            'div',
-            { class: 'stat', title: dark ? `有 ${dark} 座建筑断电，建造发电站可恢复` : '每座发电站供 3 座建筑，按建造顺序分配' },
-            h('label', {}, ico('power', '#facc15'), '电力'),
-            h('b', { class: dark ? 'bad' : '' }, `${p.powerUsed}/${p.powerCap}`),
-          ),
+          { class: 'stat', title: dark ? `有 ${dark} 座建筑断电，建造发电站可恢复` : '每座发电站供 3 座建筑，按建造顺序分配' },
+          h('label', {}, ico('power', '#facc15'), '电力'),
+          h('b', { class: dark ? 'bad' : '' }, `${p.powerUsed}/${p.powerCap}`),
         ),
-        h(
-          'div',
-          { class: 'res' },
-          ...RES_KEYS.map((k) =>
-            h('div', { title: RESOURCES[k].hint }, ico(k, RESOURCES[k].color), h('span', {}, fmt(p.resources[k])), h('small', {}, RESOURCES[k].name)),
-          ),
+      ),
+      h(
+        'div',
+        { class: 'res' },
+        ...RES_KEYS.map((k) =>
+          h('div', { title: RESOURCES[k].hint }, ico(k, RESOURCES[k].color), h('span', {}, fmt(p.resources[k])), h('small', {}, RESOURCES[k].name)),
         ),
-      );
-    } else {
-      el.append(h('div', { class: 'side-head' }, h('span', { class: 'who' }, '玩法说明'), h('span', { class: 'summary' }, s.phase === 'gameover' ? '对局已结束' : s.phase === 'aliens' ? '外星人正在行动…' : '掷骰子决定行动点…')));
-    }
+      ),
+    );
     const tabs = h(
       'div',
       { class: 'tabs' },
@@ -357,7 +481,7 @@ export class Hud {
         return b;
       }),
     );
-    const scroll = h('div', { class: 'side-scroll' }, rules ? rulesPanel() : this.panel(s, p!, ctx));
+    const scroll = h('div', { class: 'side-scroll' }, this.panel(s, p, ctx));
     // Reading the rules must not hide the way to end the turn.
     const foot = h('div', { class: 'side-foot' });
     if (p) {
@@ -372,6 +496,11 @@ export class Hud {
     }
     el.append(tabs, scroll, foot);
     scroll.scrollTop = prevScroll;
+    // The producer that was just clicked on the board: bring its line into view.
+    if (ctx.focusProducer && ctx.scrollProducer) {
+      const line = scroll.querySelector<HTMLElement>('.group.focus');
+      if (line) scroll.scrollTop = line.offsetTop - scroll.offsetTop - 8;
+    }
   }
 
   /** The picture of a unit or building that goes at the left of its row. */
@@ -382,33 +511,6 @@ export class Hud {
   private panel(s: GameState, p: PlayerState, ctx: HudCtx): HTMLElement {
     const mine = ctx.humanTurn;
     switch (ctx.tab) {
-      case 'rules':
-        return rulesPanel();
-      case 'harvest': {
-        const per = HARVEST_YIELD * p.trucks;
-        const can = mine && p.ap > 0 && p.trucks > 0;
-        const why = !mine ? '等待你的回合' : p.ap < 1 ? '行动点不足' : p.trucks < 1 ? '没有运输车' : '';
-        const box = h('div', { class: 'harvest' });
-        for (const k of RES_KEYS) {
-          const b = h(
-            'button',
-            { disabled: !can, title: why },
-            h('span', { class: 'ico', style: `color:${RESOURCES[k].color}`, html: icon(k) }),
-            h('span', { class: 'lbl' }, h('b', {}, RESOURCES[k].name), h('small', {}, `现有 ${fmt(p.resources[k])}`)),
-            h('span', { class: 'gain' }, `+${fmt(per)}`),
-          );
-          b.onclick = () => this.a.harvest(k);
-          box.append(b);
-        }
-        return h(
-          'div',
-          {},
-          h('p', { class: 'hint' }, '每消耗 1 个行动点，全部运输车出动采集一种资源，每台运回 100。'),
-          box,
-          h('p', { class: 'hint' }, `行动点 ${p.ap} · 运输车 ${p.trucks} 台（每座加工工厂限 ${TRUCKS_PER_FACTORY} 台）`),
-          mine && p.ap === 0 ? h('p', { class: 'hint' }, '行动点已用完。建造、生产和指挥部队不消耗行动点。') : null,
-        );
-      }
       case 'build': {
         const placing = ctx.placing;
         const box = h('div', {});
@@ -449,14 +551,19 @@ export class Hud {
         return box;
       }
       case 'produce': {
-        const box = h('div', {}, h('p', { class: 'hint' }, '新单位可以立即行动。产量与停机位按通电的建筑数量计算。'));
-        for (const bk of ['factory', 'barracks', 'warFactory', 'airport'] as const) {
+        const box = h('div', {}, h('p', { class: 'hint' }, '只列出已建成的建筑能生产的单位。新单位可以立即行动；产量与停机位按通电的建筑数量计算。'));
+        // A building the player has not put up says nothing: its units are not on offer at all.
+        const built = PRODUCERS.filter((bk) => countBuilding(p, bk) > 0);
+        if (!built.length) box.append(h('p', { class: 'hint' }, '还没有能生产单位的建筑。先在“建造”页建一座加工工厂、军营、军工厂或军事机场。'));
+        for (const bk of built) {
           const d = BUILDINGS[bk];
           const total = countBuilding(p, bk);
           const on = p.buildings.filter((b) => b.key === bk && b.powered).length;
           const made = p.producedThisTurn[bk] ?? 0;
-          const status = total === 0 ? '未建造' : on === 0 ? '全部断电' : d.perTurnCap ? `本回合 ${made}/${d.perTurnCap * on}` : `${total} 座`;
-          box.append(h('div', { class: 'group' }, iconBox(buildingIcon(bk, 1)), d.levels[0].name, h('small', {}, status)));
+          const status = on === 0 ? '全部断电' : d.perTurnCap ? `本回合 ${made}/${d.perTurnCap * on}` : `${total} 座`;
+          // The clicked producer's line is lit for as long as it is looked at; it flashes only on the click itself.
+          const focus = ctx.focusProducer === bk;
+          box.append(h('div', { class: focus ? `group focus${ctx.scrollProducer ? ' flash' : ''}` : 'group' }, iconBox(buildingIcon(bk, 1)), d.levels[0].name, h('small', {}, status)));
           for (const uk of PRODUCED_UNITS[bk]) {
             const ud = UNITS[uk];
             const err = canProduce(s, p, uk);
@@ -478,7 +585,6 @@ export class Hud {
                 btn,
               ),
             );
-            if (total === 0) box.lastElementChild!.classList.add('off');
           }
         }
         return box;
@@ -498,7 +604,7 @@ export class Hud {
               'div',
               { class: 'name' },
               lv.name,
-              b.level === 2 ? h('span', { class: 'tag good' }, '2 级') : null,
+              b.level > 1 ? h('span', { class: 'tag good' }, `${b.level} 级`) : null,
               d.needsPower && !b.powered ? h('span', { class: 'tag warn' }, '断电') : null,
               b.key === 'hq' ? h('span', { class: 'tag' }, '被摧毁即战败') : null,
             ),
@@ -511,10 +617,11 @@ export class Hud {
             ),
           );
           const row = this.row(buildingIcon(b.key, b.level), body);
-          if (d.levels.length > 1 && b.level === 1) {
-            const next = d.levels[1];
+          // The rung above, for as long as there is one: the net has four, everything else at most one.
+          const next = nextLevelOf(b);
+          if (next) {
             const err = canUpgrade(p, b.id);
-            const gain = net ? `防御 ${lv.defense} → ${next.defense}` : b.key === 'hq' ? '领地向战场方向扩大一圈' : `攻击 ${lv.attack} → ${next.attack} · 射程 ${lv.range} → ${next.range}`;
+            const gain = net ? `抵扣 ${lv.defense} → ${next.defense} 点` : b.key === 'hq' ? '领地向战场方向扩大一圈' : `攻击 ${lv.attack} → ${next.attack} · 射程 ${lv.range} → ${next.range}`;
             body.append(h('div', { class: 'sub' }, h('span', {}, `升级为${next.name}：${gain}`), costChips(next.cost, p.resources)));
             const btn = h('button', { class: 'btn small', disabled: !mine || !!err, title: err ?? '' }, '升级');
             btn.onclick = () => this.a.upgrade(b.id);
@@ -543,22 +650,25 @@ export class Hud {
     const info = ref ? describe(s, ref, ctx.selection !== null && ctx.humanTurn) : ctx.tile ? describeTile(s, ctx.tile) : null;
     if (!info) return;
     const mine = ctx.selection !== null && ctx.humanTurn;
-    const card = h(
+    const body = h(
       'div',
-      { class: 'card' },
-      iconBox(info.art),
-      h('div', {}, h('div', { class: 'title' }, h('span', { class: 'dot', style: `--c:${info.color}` }), info.title, ...info.tags), h('div', { class: 'stats' }, ...info.stats), info.terrain),
+      { class: 'card-body' },
+      h('div', { class: 'head' }, h('div', { class: 'title' }, h('span', { class: 'dot', style: `--c:${info.color}` }), info.title), info.tags.length ? h('div', { class: 'tags' }, ...info.tags) : null),
+      info.meters ? metersEl(info.meters) : null,
+      info.stats.length ? h('div', { class: 'stats' }, ...info.stats) : null,
     );
-    if (info.help) card.append(h('div', { class: 'help' }, info.help));
+    // Under the figures: the ground under its feet, how to command it, and the way out.
+    const actions: HTMLElement[] = [];
     if (mine) {
       const next = h('button', { class: 'btn small', title: '快捷键 Tab' }, '下一个待命');
       next.onclick = this.a.nextUnit;
       const cancel = h('button', { class: 'btn small ghost' }, '取消');
       cancel.onclick = this.a.deselect;
-      card.append(next, cancel);
-    } else if (!ctx.humanTurn && ref) {
-      card.append(h('div', { class: 'help' }, '点击空地关闭 · Esc 打开暂停菜单'));
+      actions.push(next, cancel);
     }
-    el.append(card);
+    const notes = [info.terrain, info.help ? h('div', { class: 'help' }, info.help) : null];
+    if (!mine && !ctx.humanTurn && ref) notes.push(h('div', { class: 'help' }, '点击空地关闭 · Esc 打开暂停菜单'));
+    if (notes.some(Boolean) || actions.length) body.append(h('div', { class: 'card-foot' }, h('div', { class: 'notes' }, ...notes), actions.length ? h('div', { class: 'card-actions' }, ...actions) : null));
+    el.append(h('div', { class: 'card' }, iconBox(info.art), body));
   }
 }

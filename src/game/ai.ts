@@ -322,10 +322,11 @@ export function aiDecide(s: GameState, pid: number): Action | null {
   }
 
   // 5. Upgrades once comfortably rich: the guns first, then a bigger base.
+  //    The net has a long ladder, so it is climbed one rung at a time.
   for (const [k, cushion] of [['turret', 3], ['defenseNet', 3], ['aaGun', 3], ['hq', 1.5]] as const) {
-    const b = p.buildings.find((x) => x.key === k && x.level === 1);
+    const b = p.buildings.find((x) => x.key === k && x.level < BUILDINGS[k].levels.length);
     if (!b) continue;
-    if (canAfford(p, scale(BUILDINGS[k].levels[1].cost, cushion)) && canUpgrade(p, b.id) === null) {
+    if (canAfford(p, scale(BUILDINGS[k].levels[b.level].cost, cushion)) && canUpgrade(p, b.id) === null) {
       return { type: 'UPGRADE', buildingId: b.id };
     }
   }

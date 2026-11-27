@@ -287,7 +287,7 @@ describe('基地防御', () => {
 
 describe('外星人克洛伊', () => {
   /** Chloe dropped next to player 1's base with nothing else in reach. */
-  function chloeAtBase(netLevel: 0 | 1 | 2) {
+  function chloeAtBase(netLevel: number) {
     const s = newGame(['human', 'human'], 1);
     const foe = s.players[1];
     const hq = foe.buildings[0];
@@ -311,8 +311,11 @@ describe('外星人克洛伊', () => {
     expect(tryApply(s, { type: 'ATTACK', source: unit(tank.id), target: building(net.id) })).toBe('目标不存在');
   });
 
-  it('高级防御网抵扣 5 点；没有防御网则承受全部 13 点', () => {
-    expect(chloeAtBase(2).hq.hp).toBe(20 - 8);
+  it('防御网每一级都多抵扣一些；没有防御网则承受全部 13 点', () => {
+    // Chloe's 13 less what each rung of the net absorbs: 2 / 3 / 4 / 6 / 8.
+    for (const [level, absorbed] of [[1, 2], [2, 3], [3, 4], [4, 6], [5, 8]] as const) {
+      expect(chloeAtBase(level).hq.hp).toBe(20 - (13 - absorbed));
+    }
     expect(chloeAtBase(0).hq.hp).toBe(20 - 13);
   });
 

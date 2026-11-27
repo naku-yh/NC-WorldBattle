@@ -67,9 +67,10 @@ function setup() {
     restart: () => undefined,
     quit: () => undefined,
   });
-  // The one private step the test needs: turning the sheet over to the slots.
-  const slots = (): void => (menu as unknown as { draw(level: 'main' | 'save'): void }).draw('save');
-  return { dialogs, menu, slots, resumed: () => resumed };
+  // The two private steps the tests need: turning the sheet over to the slots, and to the rulebook.
+  const slots = (): void => (menu as unknown as { draw(level: 'main' | 'save' | 'rules'): void }).draw('save');
+  const book = (): void => (menu as unknown as { draw(level: 'main' | 'save' | 'rules'): void }).draw('rules');
+  return { dialogs, menu, slots, book, resumed: () => resumed };
 }
 
 describe('暂停菜单与弹层', () => {
@@ -112,6 +113,30 @@ describe('暂停菜单与弹层', () => {
     expect(dialogs.escape()).toBe(true);
     expect(menu.up).toBe(false);
     expect(resumed()).toBe(1);
+  });
+
+  it('停在玩法页时，Esc 只退回菜单；从存档位直接翻到玩法也行，对局一直是暂停的', () => {
+    const { dialogs, menu, slots, book, resumed } = setup();
+    // The rulebook is nothing to show while the menu is down.
+    menu.showRules();
+    expect(menu.up).toBe(false);
+    menu.open();
+    menu.showRules();
+    expect(menu.up).toBe(true);
+    expect(dialogs.blocking).toBe(true);
+    expect(dialogs.escape()).toBe(true);
+    expect(menu.up).toBe(true);
+    expect(resumed()).toBe(0);
+    // Slots, then straight on to the rules without passing the menu: one Esc is still only one step back.
+    slots();
+    book();
+    expect(dialogs.escape()).toBe(true);
+    expect(menu.up).toBe(true);
+    expect(resumed()).toBe(0);
+    expect(dialogs.escape()).toBe(true);
+    expect(menu.up).toBe(false);
+    expect(resumed()).toBe(1);
+    expect(dialogs.blocking).toBe(false);
   });
 
   it('换一局时，弹层服务会把还开着的菜单一并收掉，之后还能再开', () => {

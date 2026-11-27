@@ -1,8 +1,8 @@
 # AGENTS.md — NC WorldBattle
 
-回合制 3D 即时战略，浏览器直接玩。2–4 名玩家各占正方形地图一角，每回合掷骰子争夺行动点，采集矿石 / 石油 / 肉，建设基地、训练部队，第 6–10 回合有外星人克洛伊乱入，打满所选回合数后基地生命值最高者获胜。
+回合制 3D 即时战略，浏览器直接玩。2–4 名玩家各占正方形地图一角，每回合掷骰子争夺行动点，采集矿石 / 石油 / 肉，建设基地、训练部队，第 5–8 回合起有外星人来袭，打满所选回合数后积分最高者获胜。
 
-技术栈：Vite + TypeScript（strict）+ three.js 0.187 + Vitest 4，纯前端无后端。目录 `/Users/naku/Documents/NakuRTS`，**不是 git 仓库**（只有 .gitignore）。
+技术栈：Vite + TypeScript（strict）+ three.js 0.187 + Vitest 4，纯前端无后端。仓库根目录就是项目根目录。
 
 ## 常用命令
 
@@ -27,21 +27,23 @@
   - `__tests__/` — 规则测试（`helpers.ts` 提供 newGame / apply / toTurn / rich / spawn / build / playGame）
 - `src/render/` — three.js 画面，import game/，不 import ui/
   - `scene.ts` — 棋盘、高亮池、相机与平移（HIGHLIGHT / VIEW_DIR / worldOf）；`showcase()` 是首页的展示镜头（低角度、缓慢自转）
-  - `view.ts` — GameView：实体模型、动画、特效、事件播放
-  - `models.ts` — 单位 / 建筑 / 资源点 / 克洛伊模型
-  - `terrain.ts` — 树林 / 岩石实例化、桥、水面
+  - `view.ts` — GameView：实体模型、动画、特效、事件播放；`load()` 负责把上一块棋盘的东西清干净。血条只在受伤时显示，选中的单位头顶是绿色倒三角（`selectionMark`）
+  - `models.ts` — 单位 / 建筑 / 资源点 / 五种外星人模型。`bake()` 把一个模型里不动的零件按材质合并成少量网格，`scrap()` 在模型离场时释放它独占的几何体和材质
+  - `dome.ts` — 防御网的穹顶（着色器：边缘轮廓光、网格、上爬的光环、受击涟漪）
+  - `plumes.ts` — 烟囱冒出的蒸汽和烟（整块棋盘共用一个 Points）
+  - `terrain.ts` — 树林 / 岩石 / 小草 / 野花（实例化，随风摇摆）、桥、水面着色器
   - `fx.ts` — 攻击特效与飘字
   - `palette.ts` — 地形颜色（棋盘与小地图共用）
   - `coords.ts` — tile ↔ world 坐标换算
 - `src/ui/` — DOM 界面层，import game/ 和 render/
   - `controller.ts` — 主控制器：回合驱动、输入、建筑选址、相机、暂停、存档流程
   - `home.ts` — 首页（大标题、新游戏 / 加载存档、HUD 风格边框）
-  - `menus.ts` — 暂停菜单（Esc）与首页的加载面板，液态玻璃卡片
+  - `menus.ts` — 暂停菜单（Esc：继续 / 玩法 / 存档 / 重新开始 / 退出）与首页的加载面板，液态玻璃卡片
   - `saves.ts` — 存档读写、校验与旧版本迁移（localStorage，3 个存档位，键 `nc-worldbattle.save.N`）
   - `scores.ts` — 小地图下方的积分榜
   - `slots.ts` — 存档位列表（保存和读取共用）
   - `showcase.ts` — 首页背后那块只用于展示的棋盘
-  - `hud.ts` — 侧边栏（采集 / 建造 / 生产 / 建筑 / 玩法页签）
+  - `hud.ts` — 侧边栏（建造 / 生产 / 建筑页签）、侧边栏左边的采集面板（只在人类玩家有行动点时出现）、底部的单位卡片（数值画成格子，见 `Meter`）
   - `overlays.ts` — 弹层服务：开局设置、骰子、横幅、结算、确认框、toast
   - `minimap.ts` — 左上角全局小地图；`paintGround` / `paintZones` / `paintForces` 也用来画存档缩略图
   - `icons.ts` — 手绘 SVG 图标（资源 / 单位 / 建筑 / 地形 / 菜单线性图标 `glyph()`）
@@ -61,7 +63,11 @@
 - 规则层没有 DOM 依赖；`engine.ts` 里的 `reduce` 是唯一的行动入口，就地修改 GameState 并返回事件列表。
 - **加一种外星人**要动四处：`data.ts` 的 `ALIENS`（数值与 `fx`）、`render/models.ts` 的 `buildAlien`、`ui/icons.ts` 的 `ALIEN_ART`，再在 `src/game/__tests__/aliens.test.ts` 补测试。外星人占的格子记在 `BoardIndex.others`；小蜘蛛（`s.brood`）不算在外星人上限里。
 - **每个玩家的领地大小不一样**（基地升级后多一圈）：判断“在不在领地里”一律用 `board.ts` 的 `zoneSize(p)`，不要用 `ZONE_SIZE` 常量。
-- **GameState 必须保持纯 JSON 数据**（不能有类实例、Map、函数、undefined 依赖）：存档就是 `JSON.stringify(state)`，`src/game/__tests__/save.test.ts` 会验证“任意一步存档、读档后结局一致”。
+- **GameState 必须保持纯 JSON 数据**（不能有类实例、Map、函数、undefined 依赖）：存档就是 `JSON.stringify(state)`，`src/game/__tests__/save.test.ts` 会验证“任意一步存档、读档后结局一致”。改了已有字段的**含义**（不是加字段）时，在 `ui/saves.ts` 里把 `VERSION` 加一，照着 `fromSecondVersion` 写一个迁移函数、补一条测试，旧存档才不会读成另一种意思。
+- **`Building.level` 是从 1 起算的级数，可以大于 2**（防御网有 5 级）。取“下一级”一律用 `engine.ts` 的 `nextLevelOf(b)`，别写 `levels[1]`；判断“是不是最高级”用 `nextLevelOf(b) === null`。
+- **换棋盘时不能留下任何东西**。`GameView.load()` 每次放上新棋盘都会跑（首页、开局设置每点一下都会重画展示棋盘），它把上一块棋盘的实体、运输车、资源点、穹顶全部移除并 `scrap()`。往 `scene.dynamic` 里**直接**加东西（不经 `create()`）时必须同时：记在一个列表里、在 `load()` 里移除并 `scrap()`。自己建的几何体 / 贴图 / `InstancedMesh` 要在 `dispose()` 里释放。曾经漏掉资源点和运输车，一局下来每帧一万九千次绘制调用。
+- **挂在单位下面、又要正对镜头的东西**（血条、选中标记）必须用 `view.ts` 的 `faceCamera()`：单位自身有朝向，直接抄相机的四元数会被单位的朝向拧歪。血条的三层（边框、已损失、剩余）必须都是透明材质、靠 `renderOrder` 排顺序：只要有一层是不透明的，它会先画，然后被半透明的底色盖住，整条血条就成了黑条。
+- **模型里会动的零件**（炮塔、雷达、风扇、抽油机）放进标了 `userData.live = true` 的 Group，`bake()` 会把它们单独合并、保持可动；完全不能合并的 Mesh 标 `userData.keep`（运输车的货斗）。用 `new` 创建、又留在 `bake()` 之外的网格，几何体要标 `userData.owned = true` 才会在离场时被释放。
 - **对局里的一切等待都走 `Controller.nap()`**（暂停感知），不要直接用 `wait()`；动画速度只通过 `syncClock()` 设置 `view.timeScale`。弹层必须经 `Overlays.open()` 登记，换局时才能被清理。
 - 对局中 Esc 永远是暂停菜单；暂停期间 `dispatch()` 一律拒绝，任何新的异步流程都要先过 `gate()` / `running()`。
 
@@ -79,12 +85,14 @@
 - `helpers.ts` 的 `newGame()` 默认 `terrain: 'plain'`（平原），保证数字只由规则决定；需要随机地形的测试显式传 `{ terrain: 'random' }`。
 - 常用工具：`apply` / `tryApply` / `toTurn` / `nextTurn` / `rich` / `spawn` / `build` / `placeBuilding` / `playGame`（整局模拟）。
 - 写规则类测试时断言规则（伤害、价格、限制），写地形类测试时用 `setTerrain` 或随机地图断言不变量（桥的数量、水道带区、领地干净）。
+- 贴在另一个面上的薄片（奶牛的黑斑、墙上的窗带）要明显凸出来（≥ 0.004），不能和底面共面，否则拖动镜头时会闪。
 
 ## 浏览器验证（可选）
 
-- 开发构建有全局 handle `window.nc = { scene, view, game, THREE }`（仅 dev），可在控制台里查状态。
+- 开发构建有全局 handle `window.nc = { scene, view, game, THREE }`（仅 dev），可在控制台里查状态。`view.state` 是当前画面对应的状态（首页的展示棋盘也在里面），`game.store` 只在对局中存在。
 - 游戏从首页的“新游戏 → 开始游戏”进入；直接调用内部方法可以开局，但开局设置的遮罩不会收起。
 - 改动源码会触发 Vite 刷新页面回到首页；未保存的对局会丢，所以要先把状态存进存档位（localStorage 在刷新后保留）。
+- 性能自查：`nc.scene.renderer.info.render.calls` 是每帧绘制调用数，`nc.scene.renderer.info.memory.geometries` / `.textures` 是显卡上的几何体和贴图数。在首页和几局之间来回切换后，后两个数应当回到同一个值；一直涨就是有东西没释放。
 - 存档只在 `localStorage` 的 `nc-worldbattle.save.0..2` 里，调试时可以直接读写这几个键。
 
 ## 改动前先读

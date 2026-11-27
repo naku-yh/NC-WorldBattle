@@ -3,8 +3,10 @@ import { ALIENS, SPIDERLING, UNITS } from '../game/data';
 import { alienById, buildingById, spiderById, unitById } from '../game/engine';
 import { DEPOT_LOCAL, supplyRoute, tilesOf, toLocal, toWorld, zoneSize } from '../game/board';
 import type { AlienState, Building, GameEvent, GameState, PlayerState, Pt, Spiderling, Unit } from '../game/types';
+import { ShieldDome } from './dome';
 import { Floaters, Fx } from './fx';
-import { buildAlien, buildBuilding, buildNode, buildSpiderling, buildTruck, buildUnit, cargoMaterial, type Model, type TruckModel } from './models';
+import { buildAlien, buildBuilding, buildNode, buildSpiderling, buildTruck, buildUnit, cargoMaterial, scrap, type Model, type TruckModel } from './models';
+import { Plumes, type Steam } from './plumes';
 import { HIGHLIGHT, Scene, worldOf } from './scene';
 
 type Kind = 'unit' | 'building' | 'alien' | 'spider';
@@ -23,6 +25,16 @@ const keyOf = (r: Ref): string => `${r.kind}:${r.id}`;
 const tintOf = (hex: string): number => parseInt(hex.slice(1), 16);
 const SPIDER_TINT = 0xe879f9;
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
+const facing = new THREE.Quaternion();
+/**
+ * Turns `part`, which hangs inside `root`, to face the camera. The root is
+ * itself turned (a unit faces where it is heading), so the part has to take
+ * that turn out first: otherwise a mark over a unit would swing round with it
+ * and end up edge-on, a sliver instead of a triangle.
+ */
+function faceCamera(part: THREE.Object3D, root: THREE.Object3D, camQ: THREE.Quaternion): void {
+  part.quaternion.copy(facing.copy(root.quaternion).invert().multiply(camQ));
+}
 /** Height of the invisible box that catches mouse clicks for a model. */
 const hitH = (m: Model): number => Math.max(0.45, m.hitH ?? m.height) + 0.25;
 /** Shortest-path angle interpolation. */
@@ -35,7 +47,43 @@ function turn(current: number, target: number, k: number): number {
 
 const HIT_MAT = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false });
 
-/** Little health bar that always faces the camera. */
+/** A triangle in the xy-plane, so wide at `top` and meeting at `tip` below. */
+function triangle(half: number, top: number, tip: number): THREE.Shape {
+  const shape = new THREE.Shape();
+  shape.moveTo(-half, top);
+  shape.lineTo(half, top);
+  shape.lineTo(0, tip);
+  shape.closePath();
+  return shape;
+}
+
+// The mark over whatever is selected: a green triangle pointing down at it, edged in dark so that
+// it reads against grass and against concrete alike. One shape for everyone; only where it hangs differs.
+const MARK_EDGE = new THREE.ShapeGeometry(triangle(0.15, 0.022, -0.185));
+const MARK_FILL = new THREE.ShapeGeometry(triangle(0.12, 0.0, -0.15));
+const MARK_EDGE_MAT = new THREE.MeshBasicMaterial({ color: 0x052e12, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+const MARK_FILL_MAT = new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+
+/** The selection mark, hanging from an entity's root. It starts hidden; the frame loop places it. */
+function selectionMark(): THREE.Group {
+  const g = new THREE.Group();
+  const edge = new THREE.Mesh(MARK_EDGE, MARK_EDGE_MAT);
+  edge.renderOrder = 92;
+  const fill = new THREE.Mesh(MARK_FILL, MARK_FILL_MAT);
+  fill.renderOrder = 93;
+  g.add(edge, fill);
+  g.visible = false;
+  return g;
+}
+
+/**
+ * Little health bar that always faces the camera: what is left, in green, amber
+ * or red, over what is gone in dark red, inside a pale frame. The three layers
+ * must all be drawn in the same pass and in that order. The fill used to be the
+ * only opaque one of them, which meant it was drawn first and the translucent
+ * backing was laid over it: whatever was left of the health, the bar read as a
+ * dark smudge.
+ */
 class HpBar {
   readonly group = new THREE.Group();
   ratio = 1;
@@ -43,24 +91,37 @@ class HpBar {
   private mat: THREE.MeshBasicMaterial;
   private w: number;
 
+  /** How tall the bar is; the fill leaves a margin inside it. */
+  private static readonly h = 0.1;
+
   constructor(w: number) {
     this.w = w;
+    // The plane and every ink belong to this one entity (see `scrap`).
     const geo = new THREE.PlaneGeometry(1, 1);
-    const bg = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x0b0f16, transparent: true, opacity: 0.82, depthTest: false, depthWrite: false }));
-    bg.scale.set(w, 0.075, 1);
-    bg.renderOrder = 90;
-    this.mat = new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false });
-    this.fill = new THREE.Mesh(geo, this.mat);
-    this.fill.renderOrder = 91;
-    this.group.add(bg, this.fill);
+    geo.userData.owned = true;
+    const layer = (color: number, opacity: number, order: number, width: number, height: number): THREE.Mesh => {
+      const ink = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false });
+      ink.userData.owned = true;
+      const mesh = new THREE.Mesh(geo, ink);
+      mesh.scale.set(width, height, 1);
+      mesh.renderOrder = order;
+      this.group.add(mesh);
+      return mesh;
+    };
+    const h = HpBar.h;
+    // The frame stands a little proud all round, so that the bar reads against a dark hull and against pale concrete alike.
+    layer(0xe6ecf5, 0.85, 90, w + 0.03, h + 0.03);
+    layer(0x7f1d1d, 0.96, 91, w, h);
+    this.fill = layer(0x4ade80, 1, 92, w - 0.022, h - 0.036);
+    this.mat = this.fill.material as THREE.MeshBasicMaterial;
     this.set(1);
   }
 
   set(ratio: number): void {
     const r = clamp(ratio, 0, 1);
     this.ratio = r;
-    const fw = this.w - 0.03;
-    this.fill.scale.set(Math.max(0.02, fw * r), 0.048, 1);
+    const fw = this.w - 0.022;
+    this.fill.scale.x = Math.max(0.02, fw * r);
     this.fill.position.x = (-fw * (1 - r)) / 2;
     this.mat.color.setHex(r > 0.55 ? 0x4ade80 : r > 0.28 ? 0xfacc15 : 0xf87171);
   }
@@ -73,6 +134,8 @@ interface View {
   root: THREE.Group;
   model: Model;
   hp: HpBar;
+  /** The green triangle over it while it is the selection. */
+  mark: THREE.Group;
   hit: THREE.Mesh;
   path: THREE.Vector3[];
   speed: number;
@@ -83,6 +146,10 @@ interface View {
   hover: number;
   phase: number;
   pop: number;
+  /** Whose building it is, for the glass over their base. */
+  owner?: number;
+  /** The chimneys, if it has any. */
+  steam?: Steam;
 }
 
 interface TruckView {
@@ -104,35 +171,9 @@ interface TruckView {
 }
 
 interface NetView {
-  group: THREE.Group;
+  dome: ShieldDome;
   level: number;
   powered: boolean;
-}
-
-let gridTex: THREE.CanvasTexture | null = null;
-/** Faint grid for the defense net's walls. */
-function netTexture(): THREE.CanvasTexture {
-  if (!gridTex) {
-    const c = document.createElement('canvas');
-    c.width = c.height = 64;
-    const g = c.getContext('2d')!;
-    g.strokeStyle = 'rgba(255,255,255,0.9)';
-    g.lineWidth = 3;
-    for (const p of [0, 32, 64]) {
-      g.beginPath();
-      g.moveTo(p, 0);
-      g.lineTo(p, 64);
-      g.stroke();
-      g.beginPath();
-      g.moveTo(0, p);
-      g.lineTo(64, p);
-      g.stroke();
-    }
-    gridTex = new THREE.CanvasTexture(c);
-    gridTex.wrapS = gridTex.wrapT = THREE.RepeatWrapping;
-    gridTex.repeat.set(8, 1.6);
-  }
-  return gridTex;
 }
 
 /** The four tiles trucks park on, derived from the shared depot position. */
@@ -160,6 +201,14 @@ export class GameView {
   private pickables: THREE.Mesh[] = [];
   private nets = new Map<number, NetView>();
   private trucks = new Map<number, TruckView[]>();
+  /** The resource nodes, which belong to the board rather than to any entity. */
+  private nodeGroups: THREE.Group[] = [];
+  /** Every model on the board with a part that moves for show: radars, fans, the pump jack, the wind pump. */
+  private animated: Array<{ root: THREE.Object3D; model: Model }> = [];
+  /** Where each swinging part sits when it is at rest. */
+  private rests = new WeakMap<object, number>();
+  private plumes = new Plumes();
+  private mouth = new THREE.Vector3();
   private state: GameState | null = null;
   private waiters: Array<() => void> = [];
   private wasIdle = true;
@@ -174,7 +223,7 @@ export class GameView {
     private scene: Scene,
     floaterLayer: HTMLElement,
   ) {
-    scene.dynamic.add(this.fx.group);
+    scene.dynamic.add(this.fx.group, this.plumes.points);
     this.floaters = new Floaters(floaterLayer, scene.camera);
   }
 
@@ -210,13 +259,23 @@ export class GameView {
   /** Throws the old scene away and draws `s` as it stands. */
   load(s: GameState): void {
     this.state = s;
-    for (const v of this.views.values()) this.scene.dynamic.remove(v.root);
+    // Whatever stood on the last board goes with it. This runs for every board that is put on, the title
+    // screen's included, so a thing left here would stay for the rest of the session.
+    for (const v of this.views.values()) this.drop(v.root);
     this.views.clear();
     this.pickables = [];
+    for (const list of this.trucks.values()) for (const t of list) this.drop(t.model.group);
     this.trucks.clear();
-    this.moving = this.popping = this.trucking = 0;
-    for (const net of this.nets.values()) this.scene.dynamic.remove(net.group);
+    for (const node of this.nodeGroups) this.drop(node);
+    this.nodeGroups = [];
+    for (const net of this.nets.values()) {
+      this.scene.dynamic.remove(net.dome.group);
+      net.dome.dispose();
+    }
     this.nets.clear();
+    this.animated = [];
+    this.plumes.clear();
+    this.moving = this.popping = this.trucking = 0;
     this.fx.clear();
     this.floaters.clear();
     this.selected = null;
@@ -228,6 +287,8 @@ export class GameView {
       const corner = s.corners[node.corner];
       model.group.rotation.y = Math.atan2(corner.dx, -corner.dy);
       this.scene.dynamic.add(model.group);
+      this.nodeGroups.push(model.group);
+      if (model.motion?.length) this.animated.push({ root: model.group, model });
     }
     this.reconcile(s);
   }
@@ -243,25 +304,40 @@ export class GameView {
     root.add(model.group);
     const hp = new HpBar(kind === 'building' || kind === 'alien' ? 0.9 : 0.5);
     hp.group.position.y = model.height + 0.24;
+    // For whatever has been hurt. The selection has its own mark: a bar over a unit at full health only read as a dark smudge.
     hp.group.visible = false;
     root.add(hp.group);
+    const mark = selectionMark();
+    root.add(mark);
     const h = hitH(model);
-    const hit = new THREE.Mesh(new THREE.BoxGeometry(hitW, h, hitD), HIT_MAT);
+    // The box that catches clicks is this entity's own: it goes with the model (see `scrap`).
+    const hitGeo = new THREE.BoxGeometry(hitW, h, hitD);
+    hitGeo.userData.owned = true;
+    const hit = new THREE.Mesh(hitGeo, HIT_MAT);
     hit.position.y = h / 2;
     hit.userData.key = key;
     root.add(hit);
     if (pop) root.scale.setScalar(0.01);
     this.scene.dynamic.add(root);
     this.pickables.push(hit);
-    const v: View = { key, kind, id, root, model, hp, hit, path: [], speed: 6, heading: 0, aim: null, aimT: 0, hover: 0, phase: Math.random() * 6.28, pop: pop ? 0 : 1 };
+    const v: View = { key, kind, id, root, model, hp, hit, mark, path: [], speed: 6, heading: 0, aim: null, aimT: 0, hover: 0, phase: Math.random() * 6.28, pop: pop ? 0 : 1 };
+    if (model.motion?.length) this.animated.push({ root, model });
     if (pop) this.popping++;
     this.views.set(key, v);
     return v;
   }
 
+  /** Takes a model off the board for good, and lets go of what it alone owned on the card. */
+  private drop(root: THREE.Object3D): void {
+    this.scene.dynamic.remove(root);
+    scrap(root);
+  }
+
   private remove(v: View): void {
-    this.scene.dynamic.remove(v.root);
+    this.drop(v.root);
     this.pickables = this.pickables.filter((p) => p !== v.hit);
+    this.animated = this.animated.filter((a) => a.root !== v.root);
+    v.steam?.silence();
     this.views.delete(v.key);
     if (this.selected === v.key) {
       this.selected = null;
@@ -294,9 +370,28 @@ export class GameView {
     if (!model) return null;
     const at = worldOf(b.x + (b.w - 1) / 2, b.y + (b.h - 1) / 2, s.boardSize);
     const v = this.create('building', b.id, model, at, b.w * 0.96, b.h * 0.96, pop);
+    v.owner = owner.id;
     v.heading = this.buildingYaw(b, owner, s);
     v.root.rotation.y = v.heading;
     v.hp.set(b.hp / b.maxHp);
+    if (model.vents?.length) {
+      // One plume per chimney mouth, switched together with the building's power.
+      const mouths = model.vents.map((vent) =>
+        this.plumes.vent(
+          () => {
+            // The root may have moved since the picture was last drawn: ask it where the mouth is now.
+            v.root.updateWorldMatrix(true, false);
+            return v.root.localToWorld(this.mouth.set(vent.at[0], vent.at[1], vent.at[2]));
+          },
+          vent.kind,
+        ),
+      );
+      v.steam = {
+        set: (on) => mouths.forEach((m) => m.set(on)),
+        silence: () => mouths.forEach((m) => m.silence()),
+      };
+    }
+    this.setPower(v, b.powered);
     return v;
   }
 
@@ -309,7 +404,20 @@ export class GameView {
       v.pop = 0.5;
       this.popping++;
     }
-    if (b.key === 'defenseNet') this.syncNets(s);
+  }
+
+  /** Lit windows, beacons and chimneys follow the building's power: dark and still while it has none. */
+  private setPower(v: View, on: boolean): void {
+    for (const lamp of v.model.lamps ?? []) lamp.emissiveIntensity = on ? (lamp.userData.glow as number | undefined) ?? 1 : 0;
+    v.steam?.set(on);
+  }
+
+  private syncPower(s: GameState): void {
+    for (const v of this.views.values()) {
+      if (v.kind !== 'building') continue;
+      const hit = buildingById(s, v.id);
+      if (hit) this.setPower(v, hit.building.powered);
+    }
   }
 
   private addAlien(a: AlienState, s: GameState, pop: boolean): View {
@@ -341,59 +449,21 @@ export class GameView {
     return v;
   }
 
-  /** Four glowing walls around a player's home zone. */
+  /** A dome of glass over a player's whole home zone: the defense net as the eye sees it. */
   private addNet(owner: PlayerState, s: GameState): void {
     const old = this.nets.get(owner.id);
-    if (old) this.scene.dynamic.remove(old.group);
+    if (old) {
+      this.scene.dynamic.remove(old.dome.group);
+      old.dome.dispose();
+    }
     const b = owner.buildings.find((x) => x.key === 'defenseNet')!;
-    const level = b.level;
-    const powered = b.powered;
-    const color = powered ? this.colorOf(s, owner.id) : 0x6b7280;
     const c = s.corners[owner.corner];
-    const a = worldOf(c.ox, c.oy, s.boardSize);
     const size = zoneSize(owner);
-    const z = worldOf(c.ox + (size - 1) * c.dx, c.oy + (size - 1) * c.dy, s.boardSize);
-    const minX = Math.min(a.x, z.x) - 0.5;
-    const maxX = Math.max(a.x, z.x) + 0.5;
-    const minZ = Math.min(a.z, z.z) - 0.5;
-    const maxZ = Math.max(a.z, z.z) + 0.5;
-    const width = maxX - minX;
-    const depth = maxZ - minZ;
-    const h = level === 2 ? 1.5 : 1.05;
-    const g = new THREE.Group();
-    const wall = new THREE.MeshBasicMaterial({
-      color,
-      map: netTexture(),
-      transparent: true,
-      opacity: powered ? (level === 2 ? 0.34 : 0.24) : 0.07,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    for (const [x, zz, w, ry] of [
-      [(minX + maxX) / 2, minZ, width, 0],
-      [(minX + maxX) / 2, maxZ, width, 0],
-      [minX, (minZ + maxZ) / 2, depth, Math.PI / 2],
-      [maxX, (minZ + maxZ) / 2, depth, Math.PI / 2],
-    ]) {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), wall);
-      m.position.set(x, h / 2, zz);
-      m.rotation.y = ry;
-      g.add(m);
-    }
-    const edge = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: powered ? 0.9 : 0.25, blending: THREE.AdditiveBlending, depthWrite: false });
-    for (const zz of [minZ, maxZ]) {
-      const e = new THREE.Mesh(new THREE.BoxGeometry(width, 0.035, 0.035), edge);
-      e.position.set((minX + maxX) / 2, h, zz);
-      g.add(e);
-    }
-    for (const x of [minX, maxX]) {
-      const e = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, depth), edge);
-      e.position.set(x, h, (minZ + maxZ) / 2);
-      g.add(e);
-    }
-    this.scene.dynamic.add(g);
-    this.nets.set(owner.id, { group: g, level, powered });
+    // The middle of the zone: the centre of the tile half-way in from each of its edges.
+    const mid = worldOf(c.ox + ((size - 1) / 2) * c.dx, c.oy + ((size - 1) / 2) * c.dy, s.boardSize);
+    const dome = new ShieldDome(this.colorOf(s, owner.id), b.level, b.powered, size, mid);
+    this.scene.dynamic.add(dome.group);
+    this.nets.set(owner.id, { dome, level: b.level, powered: b.powered });
   }
 
   private syncNets(s: GameState): void {
@@ -402,7 +472,8 @@ export class GameView {
       const cur = this.nets.get(p.id);
       if (!b) {
         if (cur) {
-          this.scene.dynamic.remove(cur.group);
+          this.scene.dynamic.remove(cur.dome.group);
+          cur.dome.dispose();
           this.nets.delete(p.id);
         }
         continue;
@@ -475,11 +546,12 @@ export class GameView {
       // addTruck owns the list, so always re-read it rather than holding a copy.
       while ((this.trucks.get(p.id)?.length ?? 0) > p.trucks) {
         const t = this.trucks.get(p.id)!.pop()!;
-        this.scene.dynamic.remove(t.model.group);
+        this.drop(t.model.group);
       }
       while ((this.trucks.get(p.id)?.length ?? 0) < p.trucks) this.addTruck(p.id, s);
     }
     this.syncNets(s);
+    this.syncPower(s);
     for (const a of s.aliens) {
       const k = `alien:${a.id}`;
       alive.add(k);
@@ -581,10 +653,11 @@ export class GameView {
         case 'expand': {
           // The base has claimed the ring round it: the ground there has been levelled and coloured.
           this.scene.buildBoard(s);
-          // Its force field has to stretch to the new boundary.
+          // Its dome has to stretch to the new boundary, which the sync at the end of `handle` sees to.
           const net = this.nets.get(e.player);
           if (net) {
-            this.scene.dynamic.remove(net.group);
+            this.scene.dynamic.remove(net.dome.group);
+            net.dome.dispose();
             this.nets.delete(e.player);
           }
           break;
@@ -596,6 +669,11 @@ export class GameView {
           break;
       }
     }
+    // A new building may have taken the last of the power, or a burnt one given some back. And the
+    // dome is not an entity with a model of its own, so nothing else would put it up when the net
+    // is built or raised a rung while the picture happens to be still.
+    this.syncPower(s);
+    this.syncNets(s);
   }
 
   private ratioOf(r: Ref): number {
@@ -646,6 +724,10 @@ export class GameView {
       if (!hit.shown) {
         hit.shown = true;
         this.floaters.text(hit.amount > 0 ? `-${hit.amount}` : '格挡', to.clone().setY(to.y + 0.35), hit.amount > 0 ? 'dmg' : 'block');
+        // The glass over the owner's base, if they have one, takes the blow.
+        const struck = this.views.get(keyOf(target));
+        const net = struck?.owner === undefined ? undefined : this.nets.get(struck.owner);
+        if (net?.powered) net.dome.hit(to);
       }
       const v = this.views.get(keyOf(target));
       if (!v) return;
@@ -740,6 +822,7 @@ export class GameView {
     this.clock += dt;
     this.tick(dt);
     this.floaters.update(dt);
+    this.plumes.update(dt, this.scene.camera, this.scene.renderer.domElement.height);
     this.scene.render();
     this.onFrame(dt);
   };
@@ -778,15 +861,23 @@ export class GameView {
       if (v.hover > 0) v.root.position.y = v.hover + Math.sin(this.clock * 2.2 + v.phase) * 0.05;
       const aura = v.model.group.userData.aura as THREE.Mesh | undefined;
       if (aura) aura.scale.setScalar(1 + Math.sin(this.clock * 3 + v.phase) * 0.07);
-      for (const part of v.model.spin ?? []) part.rotation.y += dt * 1.1;
       for (const head of v.model.heads) {
         let want = 0;
         if (v.aim) want = Math.atan2(v.aim.x - v.root.position.x, v.aim.z - v.root.position.z) - v.root.rotation.y;
         head.rotation.y = turn(head.rotation.y, want, k * 1.4);
       }
       if (v.aim && (v.aimT -= dt) <= 0) v.aim = null;
-      v.hp.group.visible = v.hp.ratio < 1 || v.key === this.selected;
-      if (v.hp.group.visible) v.hp.group.quaternion.copy(camQ);
+      // The health bar is for whatever has been hurt; the mark is for whatever is selected, over its head and
+      // a little higher when the bar is showing too. It nods gently, so the eye finds it.
+      v.hp.group.visible = v.hp.ratio < 1;
+      if (v.hp.group.visible) faceCamera(v.hp.group, v.root, camQ);
+      v.mark.visible = v.key === this.selected;
+      if (v.mark.visible) {
+        const big = v.kind === 'building' || v.kind === 'alien';
+        v.mark.position.set(0, v.model.height + (v.hp.group.visible ? 0.51 : 0.29) + Math.sin(this.clock * 4) * 0.025, 0);
+        v.mark.scale.setScalar(big ? 1.35 : 1);
+        faceCamera(v.mark, v.root, camQ);
+      }
     }
 
     let trucking = 0;
@@ -836,6 +927,25 @@ export class GameView {
     this.moving = moving;
     this.popping = popping;
     this.trucking = trucking;
+
+    // Radars going round, fans turning, the pump jack nodding and the wind pump spinning. A part that
+    // swings keeps time with where it stands, so two of a kind side by side are never in step.
+    for (const { root, model } of this.animated) {
+      const place = root.position.x * 0.7 + root.position.z * 0.9;
+      for (const m of model.motion ?? []) {
+        if (m.swing === undefined) {
+          m.part.rotation[m.axis] += dt * m.speed;
+          continue;
+        }
+        let rest = this.rests.get(m);
+        if (rest === undefined) {
+          rest = m.part.rotation[m.axis];
+          this.rests.set(m, rest);
+        }
+        m.part.rotation[m.axis] = rest + Math.sin(this.clock * m.speed + place + (m.phase ?? 0)) * m.swing;
+      }
+    }
+    for (const net of this.nets.values()) net.dome.tick(dt);
 
     this.fx.update(dt);
     this.scene.tick(dt);

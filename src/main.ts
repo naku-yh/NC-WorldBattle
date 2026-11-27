@@ -18,6 +18,7 @@ const game = new Controller(scene, view, {
   side: el('sidebar'),
   log: el('log'),
   card: el('unitcard'),
+  harvest: el('harvest'),
   overlay: el('overlay'),
   toast: el('toast'),
   minimap: el('minimap') as HTMLCanvasElement,

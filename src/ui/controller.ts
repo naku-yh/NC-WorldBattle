@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { aiDecide } from '../game/ai';
 import { toWorld } from '../game/board';
-import { BOARD_SIZE, BUILDINGS, UNITS } from '../game/data';
+import { BOARD_SIZE, BUILDINGS, PLAYER_COLORS, PLAYER_NAMES, UNITS } from '../game/data';
 import { attackTargets, buildSpots, buildingById, canBuild, createGame, moveRange, placementError, unitById } from '../game/engine';
 import type { Action, BuildingKey, EntityRef, GameConfig, GameEvent, GameState, PlayerState, Pt } from '../game/types';
 import { HIGHLIGHT, VIEW_DIR, Scene, worldOf } from '../render/scene';
@@ -23,6 +23,8 @@ export interface Mounts {
   side: HTMLElement;
   log: HTMLElement;
   card: HTMLElement;
+  /** The gathering panel, beside the sidebar. */
+  harvest: HTMLElement;
   overlay: HTMLElement;
   toast: HTMLElement;
   minimap: HTMLCanvasElement;
@@ -40,7 +42,10 @@ const SHOWCASE_SEED = 7;
 /** Whose bases the title screen shows: all four. */
 const SHOWCASE_SEATS = 4;
 
-const TAB_KEYS: Tab[] = ['harvest', 'build', 'produce', 'structures', 'rules'];
+const TAB_KEYS: Tab[] = ['build', 'produce', 'structures'];
+
+/** How much of the right-hand side of the window the gathering panel takes up with its margin, in pixels (see `#harvest`). */
+const HARVEST_INSET = 258;
 
 /** One camera move: where the eye starts and where it ends up. */
 interface Glide {
@@ -65,9 +70,11 @@ export class Controller {
   private menu: PauseMenu;
   private minimap: Minimap;
   private scores: Scores;
-  private tab: Tab = 'harvest';
+  private tab: Tab = 'build';
   private sel: Sel | null = null;
   private inspect: EntityRef | null = null;
+  /** The next drawing of the sidebar is to scroll to the producer that was just clicked on the board. */
+  private scrollToProducer = false;
   /** An empty tile clicked just to look at. */
   private tile: Pt | null = null;
   /** The building the player is choosing a spot for. */
@@ -79,7 +86,14 @@ export class Controller {
   /** Space is held: dragging slides the board instead of turning the camera. */
   private space = false;
   private cam: Glide | null = null;
-  private setup: SetupState = { count: 2, seats: ['human', 'ai', 'ai', 'ai'], turns: 20, size: BOARD_SIZE };
+  private setup: SetupState = {
+    count: 2,
+    seats: ['human', 'ai', 'ai', 'ai'],
+    turns: 20,
+    size: BOARD_SIZE,
+    names: [...PLAYER_NAMES],
+    colors: [...PLAYER_COLORS],
+  };
   /** The match is paused: the picture stands still and no order goes through. */
   private paused = false;
   private pauseAt = 0;
@@ -99,7 +113,7 @@ export class Controller {
     this.overlays = new Overlays(m.overlay, m.toast, (ms) => this.nap(ms));
     this.minimap = new Minimap(m.minimap, () => this.goOverview());
     this.scores = new Scores(m.scores);
-    this.hud = new Hud(m.top, m.side, m.log, m.card, {
+    this.hud = new Hud(m.top, m.side, m.log, m.card, m.harvest, {
       setTab: (t) => {
         this.tab = t;
         if (t !== 'build') this.cancelPlace();
@@ -112,11 +126,7 @@ export class Controller {
       endTurn: () => void this.endTurn(),
       nextUnit: () => this.nextReady(),
       deselect: () => this.select(null),
-      showRules: () => {
-        this.tab = 'rules';
-        this.cancelPlace();
-        this.render();
-      },
+      showRules: () => this.showRules(),
       overview: () => this.goOverview(),
       menu: () => this.openMenu(),
       toggleSpeed: () => {
@@ -192,7 +202,7 @@ export class Controller {
         e.preventDefault();
         this.nextReady();
       } else if (e.key === 'e' || e.key === 'E') void this.endTurn();
-      else if (e.key >= '1' && e.key <= '5') {
+      else if (e.key >= '1' && e.key <= String(TAB_KEYS.length)) {
         this.tab = TAB_KEYS[Number(e.key) - 1];
         if (this.tab !== 'build') this.cancelPlace();
         this.render();
@@ -296,8 +306,10 @@ export class Controller {
       seats: [0, 1, 2, 3].map((i) => state.players[i]?.kind ?? 'ai'),
       turns: state.totalTurns,
       size: state.boardSize,
+      names: [0, 1, 2, 3].map((i) => state.players[i]?.name ?? PLAYER_NAMES[i]),
+      colors: [0, 1, 2, 3].map((i) => state.players[i]?.color ?? PLAYER_COLORS[i]),
     };
-    this.tab = 'harvest';
+    this.tab = 'build';
     this.turnKey = '';
     // A fresh match is all unsaved; one read from a file is, for now, exactly what the file holds.
     this.unsaved = slot === null;
@@ -323,12 +335,20 @@ export class Controller {
     this.sel = this.inspect = this.tile = null;
     this.cam = null;
     this.turnKey = '';
+    this.scrollToProducer = false;
+    this.scene.setSideInset(0);
     this.m.hud.classList.add('hidden');
   }
 
   /** A fresh match with the same players, turn count and map size. */
   private again(): void {
-    this.start({ seats: this.setup.seats.slice(0, this.setup.count), totalTurns: this.setup.turns, size: this.setup.size });
+    this.start({
+      seats: this.setup.seats.slice(0, this.setup.count),
+      names: this.setup.names.slice(0, this.setup.count),
+      colors: this.setup.colors.slice(0, this.setup.count),
+      totalTurns: this.setup.turns,
+      size: this.setup.size,
+    });
   }
 
   private saveTo(slot: number): boolean {
@@ -364,6 +384,13 @@ export class Controller {
     this.menu.close();
     this.m.hud.inert = false;
     this.setPaused(false);
+  }
+
+  /** The rulebook, on the back of the pause menu: the match stands still while it is read. */
+  private showRules(): void {
+    if (!this.state) return;
+    if (!this.paused) this.openMenu();
+    this.menu.showRules();
   }
 
   /**
@@ -598,9 +625,14 @@ export class Controller {
         this.dispatch({ type: 'ATTACK', source: this.sel, target });
         return;
       }
-      // Anything else is only there to be looked at.
+      // Anything else is only there to be looked at. One of the player's own producers, though,
+      // is where units come from: the "生产" page opens on its line.
       this.inspect = target;
       this.lookAtTile(null);
+      if (this.producerOf(target)) {
+        this.tab = 'produce';
+        this.scrollToProducer = true;
+      }
       this.render();
       return;
     }
@@ -613,6 +645,15 @@ export class Controller {
     this.select(null);
     this.lookAtTile(tile);
     this.render();
+  }
+
+  /** The building `ref` points at, if it is one of the current player's own producers: the buildings the "生产" page lists units under. */
+  private producerOf(ref: EntityRef | Sel | null): BuildingKey | null {
+    const s = this.state;
+    if (!s || !ref || ref.kind !== 'building' || s.phase !== 'player') return null;
+    const hit = buildingById(s, ref.id);
+    if (!hit || hit.owner.id !== s.currentPlayer) return null;
+    return BUILDINGS[hit.building.key].produces.length ? hit.building.key : null;
   }
 
   /** Remembers a tile to describe, and outlines it until something else is picked. */
@@ -769,15 +810,20 @@ export class Controller {
 
   private render(): void {
     if (!this.store) return;
-    this.hud.render(this.store.state, {
+    const harvesting = this.hud.render(this.store.state, {
       tab: this.tab,
       selection: this.sel,
       inspect: this.inspect,
       tile: this.tile,
       placing: this.placing,
+      focusProducer: this.tab === 'produce' ? this.producerOf(this.inspect) : null,
+      scrollProducer: this.scrollToProducer,
       humanTurn: this.humanTurn(),
       speed: this.speed,
     });
+    this.scrollToProducer = false;
+    // The gathering panel covers a strip of the picture when it is up: slide the board clear of it.
+    this.scene.setSideInset(harvesting ? HARVEST_INSET : 0);
     this.minimap.update(this.store.state);
     this.scores.update(this.store.state, []);
   }

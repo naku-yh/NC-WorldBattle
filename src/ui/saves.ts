@@ -4,7 +4,7 @@ import type { GameState, Phase, Terrain } from '../game/types';
 /** How many matches can be kept at once. */
 export const SAVE_SLOTS = 3;
 /** Bumped whenever GameState changes in a way old files cannot survive; such files are then refused. */
-const VERSION = 2;
+const VERSION = 3;
 const PREFIX = 'nc-worldbattle.save.';
 
 /** Everything a match needs to pick up where it left off. The state is plain data, so it stores as JSON. */
@@ -83,12 +83,13 @@ function looksLikeSave(x: unknown): x is SaveFile {
   return s.players.every((p) => isObj(p) && has(p, PLAYER_KEYS) && isList(p.units) && isList(p.buildings));
 }
 
-/** The save in `raw`, or null if it is missing or unreadable. */
+/** The save in `raw`, or null if it is missing or unreadable. Each older version is brought forward one step at a time. */
 export function decodeSave(raw: string | null): SaveFile | null {
   if (!raw) return null;
   try {
     let data: unknown = JSON.parse(raw);
     if (isObj(data) && data.v === 1 && isObj(data.state)) data = fromFirstVersion(data as unknown as { savedAt: number; state: StateV1 });
+    if (isObj(data) && data.v === 2 && isObj(data.state)) data = fromSecondVersion(data as unknown as { savedAt: number; state: GameState });
     return looksLikeSave(data) ? data : null;
   } catch {
     return null;
@@ -168,7 +169,8 @@ function fromFirstVersion(file: { savedAt: number; state: StateV1 }): SaveFile {
   };
   const scores = new Map(players.map((p) => [p.id, points(p)]));
   return {
-    v: VERSION,
+    // Written as the second version, so it goes through that version's step too.
+    v: 2,
     savedAt: file.savedAt,
     state: {
       ...rest,
@@ -186,6 +188,21 @@ function fromFirstVersion(file: { savedAt: number; state: StateV1 }): SaveFile {
       alienActed: chloeActed,
     } as unknown as GameState,
   };
+}
+
+/** Where the two-rung net's top rung ("高级防御网") sits on the five-rung ladder. */
+const OLD_NET_TOP = 3;
+
+/**
+ * The defense net used to stop at a second rung, "高级防御网", which absorbed
+ * 5. That name is now the third of five rungs, so a net that had reached it is
+ * moved there; nothing else in the state means anything different.
+ */
+function fromSecondVersion(file: { savedAt: number; state: GameState }): SaveFile {
+  for (const p of file.state.players) {
+    for (const b of p.buildings) if (b.key === 'defenseNet' && b.level === 2) b.level = OLD_NET_TOP;
+  }
+  return { v: VERSION, savedAt: file.savedAt, state: file.state };
 }
 
 // ---------------------------------------------------------------------------

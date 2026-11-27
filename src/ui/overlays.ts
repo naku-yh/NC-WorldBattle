@@ -1,8 +1,11 @@
-import { ALIEN_CAP, ALIEN_EVERY, MAP_SIZES, MIN_TURNS, PLAYER_COLORS } from '../game/data';
+import { MAP_SIZES, MIN_TURNS, PLAYER_NAMES } from '../game/data';
 import type { GameConfig, GameState, PlayerState } from '../game/types';
 import { focusInside, h, sheen } from './dom';
 import { die, glyph } from './icons';
 import { RULES_HTML } from './rules';
+
+/** The colours a seat may take its pick of; the first four are what the seats start on. */
+const SEAT_COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4', '#ec4899', '#94a3b8'];
 
 export interface SetupState {
   count: number;
@@ -10,9 +13,19 @@ export interface SetupState {
   turns: number;
   /** Board edge in tiles. */
   size: number;
+  /** What each seat is called, if the player has typed anything in. */
+  names: string[];
+  /** Each seat's colour. */
+  colors: string[];
 }
 
-const toConfig = (st: SetupState): GameConfig => ({ seats: st.seats.slice(0, st.count), totalTurns: st.turns, size: st.size });
+const toConfig = (st: SetupState): GameConfig => ({
+  seats: st.seats.slice(0, st.count),
+  totalTurns: st.turns,
+  size: st.size,
+  names: st.names.slice(0, st.count),
+  colors: st.colors.slice(0, st.count),
+});
 
 /** How dialogs pass time. The controller hands in one that stops while the match is paused. */
 export type Hold = (ms: number) => Promise<void>;
@@ -28,6 +41,21 @@ interface Dialog {
   close: () => void;
   /** Settles whatever the dialog is waiting for, so the flow behind it can end. */
   abort: () => void;
+}
+
+/** The turns stepper's two ends, reading and writing `st.turns` and redrawing the dialog. */
+function stepper(st: SetupState, redraw: () => void): Array<HTMLElement | string> {
+  const less = h('button', { disabled: st.turns <= MIN_TURNS }, '−');
+  less.onclick = () => {
+    st.turns = Math.max(MIN_TURNS, st.turns - 5);
+    redraw();
+  };
+  const more = h('button', { disabled: st.turns >= 200 }, '+');
+  more.onclick = () => {
+    st.turns = Math.min(200, st.turns + 5);
+    redraw();
+  };
+  return [less, h('span', {}, `${st.turns} 回合`), more];
 }
 
 /** Dialogs layered over the canvas: setup, dice, banners, results, questions. */
@@ -103,13 +131,38 @@ export class Overlays {
   }
 
   setup(initial: SetupState, onPreview: (cfg: GameConfig) => void, onStart: (cfg: GameConfig) => void, onBack: () => void): void {
-    const st: SetupState = { count: initial.count, turns: initial.turns, size: initial.size, seats: [0, 1, 2, 3].map((i) => initial.seats[i] ?? 'ai') };
+    const st: SetupState = {
+      count: initial.count,
+      turns: initial.turns,
+      size: initial.size,
+      seats: [0, 1, 2, 3].map((i) => initial.seats[i] ?? 'ai'),
+      names: [0, 1, 2, 3].map((i) => initial.names[i] ?? PLAYER_NAMES[i]),
+      colors: [0, 1, 2, 3].map((i) => initial.colors[i] ?? SEAT_COLORS[i]),
+    };
     const veil = h('div', { class: 'veil' });
     const dialog = h('div', { class: 'dialog' });
     veil.append(dialog);
-    const off = this.onEscape(leave);
+    // The rulebook on a panel of its own, slid out from the right on demand.
+    const drawer = h('aside', { class: 'rules-drawer' }, h('h2', {}, '玩法简介与消耗'), h('div', { class: 'rules', html: RULES_HTML }));
+    veil.append(drawer);
+    let rulesOpen = false;
+    const rulesBtn = h('button', { class: 'btn' }, '玩法简介');
+    const shutRules = (): void => {
+      rulesOpen = false;
+      drawer.classList.remove('open');
+      rulesBtn.textContent = '玩法简介';
+    };
+    rulesBtn.onclick = () => {
+      rulesOpen = !rulesOpen;
+      drawer.classList.toggle('open', rulesOpen);
+      rulesBtn.textContent = rulesOpen ? '关闭简介' : '玩法简介';
+    };
+    // Esc: the panel first, then out the way the player came.
+    const off = this.onEscape(() => {
+      if (rulesOpen) shutRules();
+      else leave();
+    });
     const close = this.open(veil, leave);
-    // Out the way the player came: back to the title screen.
     function leave(): void {
       off();
       close();
@@ -118,12 +171,30 @@ export class Overlays {
     const draw = (): void => {
       const seats = [];
       for (let i = 0; i < st.count; i++) {
+        // The name is theirs to type; the colour theirs to pick. Neither redraws the dialog on
+        // every keystroke, so the typing keeps its focus.
+        const name = h('input', { class: 'seat-name', maxlength: '8', value: st.names[i], placeholder: PLAYER_NAMES[i], 'aria-label': `第 ${i + 1} 个座位的名字` }) as HTMLInputElement;
+        name.oninput = () => {
+          st.names[i] = name.value;
+        };
+        const swatches = h(
+          'span',
+          { class: 'swatches', role: 'radiogroup', 'aria-label': `第 ${i + 1} 个座位的颜色` },
+          ...SEAT_COLORS.map((c) => {
+            const b = h('button', { class: `sw${st.colors[i] === c ? ' on' : ''}`, style: `--c:${c}`, title: c, 'aria-label': c });
+            b.onclick = () => {
+              st.colors[i] = c;
+              draw();
+            };
+            return b;
+          }),
+        );
         seats.push(
           h(
             'div',
             { class: 'seat' },
-            h('span', { class: 'dot', style: `--c:${PLAYER_COLORS[i]}` }),
-            h('span', { class: 'who' }, `玩家${i + 1}`),
+            swatches,
+            name,
             this.seg(
               [
                 ['human', '人类'],
@@ -138,7 +209,6 @@ export class Overlays {
           ),
         );
       }
-      const humans = st.seats.slice(0, st.count).filter((k) => k === 'human').length;
       const start = h('button', { class: 'btn primary' }, '开始游戏');
       start.onclick = () => {
         off();
@@ -165,41 +235,18 @@ export class Overlays {
         ),
         h('h3', {}, '座位'),
         ...seats,
-        h('h3', {}, '地图大小'),
-        this.seg(
-          MAP_SIZES.map((m) => [m.size, `${m.name} ${m.size}×${m.size}`] as [number, string]),
-          st.size,
-          (v) => {
+        h(
+          'div',
+          { class: 'setup-row' },
+          h('div', {}, h('h3', {}, '地图大小'), this.seg(MAP_SIZES.map((m) => [m.size, `${m.name} ${m.size}×${m.size}`] as [number, string]), st.size, (v) => {
             st.size = v;
             draw();
-          },
+          })),
+          h('div', {}, h('h3', {}, `总回合数（至少 ${MIN_TURNS}）`), h('span', { class: 'stepper' }, ...stepper(st, draw))),
         ),
-        h('p', { class: 'summary' }, '地形每局随机生成：一条水道横贯战场并设有两座桥，另有湖泊、树林和山地。大型地图的格子数比中型多约一半。'),
-        h('h3', {}, `总回合数（至少 ${MIN_TURNS} 回合）`),
-        h(
-          'span',
-          { class: 'stepper' },
-          (() => {
-            const b = h('button', { disabled: st.turns <= MIN_TURNS }, '−');
-            b.onclick = () => {
-              st.turns = Math.max(MIN_TURNS, st.turns - 5);
-              draw();
-            };
-            return b;
-          })(),
-          h('span', {}, `${st.turns} 回合`),
-          (() => {
-            const b = h('button', { disabled: st.turns >= 200 }, '+');
-            b.onclick = () => {
-              st.turns = Math.min(200, st.turns + 5);
-              draw();
-            };
-            return b;
-          })(),
-        ),
-        h('p', { class: 'summary', style: 'margin-top:14px' }, `${st.count} 名玩家（${humans} 人类 / ${st.count - humans} 电脑）· ${st.count === 2 ? '对角开局' : '各占一角'} · ${st.size}×${st.size} 地图 · 外星人将从第 ${ALIEN_EVERY.join('–')} 回合起陆续到来（场上最多 ${ALIEN_CAP} 个）`),
-        h('div', { class: 'setup-foot' }, start, back, h('span', { class: 'summary' }, '拖动旋转 · 滚轮缩放 · Esc 返回首页')),
-        h('details', {}, h('summary', {}, '玩法简介与消耗一览'), h('div', { class: 'rules', html: RULES_HTML })),
+        // A line of its own above the buttons: sharing their row, the buttons left it no width to lie down in.
+        h('p', { class: 'setup-hint' }, '拖动旋转 · 滚轮缩放 · Esc 返回首页'),
+        h('div', { class: 'setup-foot' }, start, rulesBtn, back),
       );
       onPreview(toConfig(st));
     };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createGame, reduce } from '../../game/engine';
-import type { GameState } from '../../game/types';
+import type { Building, GameState } from '../../game/types';
 import { SAVE_SLOTS, ago, decodeSave, encodeSave, eraseSave, infoOf, listSlots, readSave, writeSave } from '../saves';
 
 const KEY = (slot: number): string => `nc-worldbattle.save.${slot}`;
@@ -54,7 +54,7 @@ describe('存档文件', () => {
     ['地形表与地图大小对不上', JSON.stringify({ v: 1, savedAt: NOW, state: { ...game(), terrain: ['plain'] } })],
     ['不认识的回合阶段', JSON.stringify({ v: 1, savedAt: NOW, state: { ...game(), phase: 'loading' } })],
     ['别的版本的存档', JSON.stringify({ v: 99, savedAt: NOW, state: game() })],
-    ['缺少时间的文件', JSON.stringify({ v: 2, state: game() })],
+    ['缺少时间的文件', JSON.stringify({ v: 3, state: game() })],
   ])('%s：读不出来，并且标成损坏而不是空的', (_, raw) => {
     const st = fakeStorage({ [KEY(1)]: raw });
     const [slot] = listSlots(st).filter((x) => x.slot === 1);
@@ -98,7 +98,8 @@ describe('旧版本的存档', () => {
     const [slot] = listSlots(fakeStorage({ [KEY(0)]: firstVersionFile() })).filter((x) => x.slot === 0);
     expect(slot.broken).toBe(false);
     const file = slot.save!;
-    expect(file.v).toBe(2);
+    // Brought all the way up: first to the second version, then to the third.
+    expect(file.v).toBe(3);
     const s = file.state;
     expect(s.phase).toBe('aliens');
     expect(s.aliens).toHaveLength(1);
@@ -132,6 +133,46 @@ describe('旧版本的存档', () => {
     delete file.state.players;
     const [slot] = listSlots(fakeStorage({ [KEY(2)]: JSON.stringify(file) })).filter((x) => x.slot === 2);
     expect(slot).toEqual({ slot: 2, save: null, broken: true });
+  });
+});
+
+/** A file as the second version wrote them: a defense net with two rungs, the top one absorbing 5. */
+function secondVersionFile(netLevel: number): string {
+  const s = game();
+  const p = s.players[0];
+  const net: Building = { id: 9999, key: 'defenseNet', level: netLevel, hp: 0, maxHp: 0, x: p.buildings[0].x + 0.5, y: p.buildings[0].y + 0.5, w: 0, h: 0, powered: true, fired: false, reacted: false };
+  p.buildings.push(net);
+  s.turn = 9;
+  return JSON.stringify({ v: 2, savedAt: NOW, state: s });
+}
+
+describe('第二版的存档', () => {
+  it('“高级防御网”原来是 2 级，现在是五级里的第 3 级，读档后就落在那里', () => {
+    const file = decodeSave(secondVersionFile(2))!;
+    expect(file.v).toBe(3);
+    expect(file.savedAt).toBe(NOW);
+    const net = file.state.players[0].buildings.find((b) => b.key === 'defenseNet')!;
+    expect(net.level).toBe(3);
+    // Everything else is where it was, and the match carries on from there.
+    expect(file.state.turn).toBe(9);
+    expect(file.state.players[0].buildings[0]).toMatchObject({ key: 'hq', level: 1 });
+    expect(reduce(structuredClone(file.state), { type: 'ROLL_DICE' }).ok).toBe(true);
+    // With room above it still: the net can be upgraded twice more.
+    file.state.players[0].resources = { ore: 99999, oil: 99999, meat: 99999 };
+    file.state.phase = 'player';
+    file.state.currentPlayer = 0;
+    for (const level of [4, 5]) {
+      expect(reduce(file.state, { type: 'UPGRADE', buildingId: net.id }).ok).toBe(true);
+      expect(net.level).toBe(level);
+    }
+  });
+
+  it('才 1 级的防御网原样保留；写出来的存档读回来还是第三版', () => {
+    expect(decodeSave(secondVersionFile(1))!.state.players[0].buildings.at(-1)!.level).toBe(1);
+    const s = game();
+    const file = decodeSave(encodeSave(s, NOW))!;
+    expect(file.v).toBe(3);
+    expect(file.state).toEqual(s);
   });
 });
 

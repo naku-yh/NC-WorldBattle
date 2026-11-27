@@ -12,9 +12,9 @@ export const HIGHLIGHT = { move: 0x60a5fa, attack: 0xef4444, spawn: 0xfbbf24, bu
 /** Highlights sit a hair above the board, and above the bridge decks too. */
 const MARK_Y = 0.075;
 
-/** Light streaks on a stretch of water. */
+/** Light streaks on a stretch of water, under the sheet of water drawn over them. */
 function waves(g: CanvasRenderingContext2D, x0: number, y0: number, px: number, x: number, y: number): void {
-  g.strokeStyle = 'rgba(200,232,255,0.3)';
+  g.strokeStyle = 'rgba(200,232,255,0.2)';
   g.lineWidth = 3;
   g.lineCap = 'round';
   for (let i = 0; i < 3; i++) {
@@ -26,6 +26,55 @@ function waves(g: CanvasRenderingContext2D, x0: number, y0: number, px: number, 
     g.quadraticCurveTo(ox + 27, oy + 6, ox + 34, oy);
     g.stroke();
   }
+}
+
+/** A soft patch of colour laid over a tile, for grain: a darker patch, a sunnier one, a wet one. */
+function patch(g: CanvasRenderingContext2D, x: number, y: number, r: number, color: string): void {
+  const grad = g.createRadialGradient(x, y, 0, x, y, r);
+  grad.addColorStop(0, color);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(x - r, y - r, r * 2, r * 2);
+}
+
+/** Light in the middle and shade at the edges, so a hill tile reads as a mound seen from above. */
+function mound(g: CanvasRenderingContext2D, x0: number, y0: number, px: number): void {
+  const cx = x0 + px / 2;
+  const cy = y0 + px / 2;
+  const grad = g.createRadialGradient(cx, cy, 0, cx, cy, px * 0.72);
+  grad.addColorStop(0, 'rgba(255,246,220,0.26)');
+  grad.addColorStop(0.5, 'rgba(255,246,220,0)');
+  grad.addColorStop(0.8, 'rgba(46,34,12,0.2)');
+  grad.addColorStop(1, 'rgba(46,34,12,0.32)');
+  g.fillStyle = grad;
+  g.fillRect(x0, y0, px, px);
+}
+
+/** A few patches scattered over a tile: where they fall is fixed by the tile, so a map always looks the same. */
+function grain(g: CanvasRenderingContext2D, x: number, y: number, x0: number, y0: number, px: number, patches: string[]): void {
+  patches.forEach((color, i) => {
+    const r = px * (0.2 + noise(x, y, i, 60) * 0.16);
+    patch(g, x0 + r + noise(x, y, i, 61) * (px - 2 * r), y0 + r + noise(x, y, i, 62) * (px - 2 * r), r, color);
+  });
+}
+
+/** The sky the map sits under, as a band of colour from the ground (bottom) to the zenith (top). */
+function skyTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 256;
+  const g = c.getContext('2d')!;
+  const grad = g.createLinearGradient(0, 256, 0, 0);
+  grad.addColorStop(0, '#26352a');
+  grad.addColorStop(0.47, '#7f9a80');
+  grad.addColorStop(0.53, '#d5e6f6');
+  grad.addColorStop(0.75, '#8db8ea');
+  grad.addColorStop(1, '#4f86d2');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 4, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 function drawBoard(s: GameState): HTMLCanvasElement {
@@ -43,8 +92,11 @@ function drawBoard(s: GameState): HTMLCanvasElement {
       const col = TERRAIN_COLORS[t];
       g.fillStyle = (x + y) % 2 === 0 ? col.a : col.b;
       g.fillRect(X(x), Y(y), px, px);
-      if (t === 'water' || t === 'lake') waves(g, X(x), Y(y), px, x, y);
-      else if (t === 'bridge') {
+      if (t === 'water' || t === 'lake') {
+        // Deeper in the middle of the tile; the sheet of water over it does the rest.
+        grain(g, x, y, X(x), Y(y), px, ['rgba(3,18,44,0.3)', 'rgba(3,18,44,0.2)']);
+        waves(g, X(x), Y(y), px, x, y);
+      } else if (t === 'bridge') {
         // Planks run along the waterway; the deck is laid across it.
         g.fillStyle = 'rgba(60,34,12,0.45)';
         for (let i = 0; i < 6; i++) {
@@ -52,15 +104,22 @@ function drawBoard(s: GameState): HTMLCanvasElement {
           if (s.waterway === 'vertical') g.fillRect(X(x) + o, Y(y) + px * 0.2, 4, px * 0.6);
           else g.fillRect(X(x) + px * 0.2, Y(y) + o, px * 0.6, 4);
         }
-      } else if (t === 'forest' || t === 'hill') {
-        // Tufts of undergrowth, or loose stones.
-        g.fillStyle = t === 'forest' ? 'rgba(12,40,18,0.35)' : 'rgba(255,246,220,0.16)';
+      } else if (t === 'forest') {
+        // A dark floor under the trees, with what light gets through it.
+        grain(g, x, y, X(x), Y(y), px, ['rgba(8,32,14,0.34)', 'rgba(8,32,14,0.26)', 'rgba(170,214,120,0.12)']);
+        g.fillStyle = 'rgba(12,40,18,0.35)';
         for (let i = 0; i < 5; i++) {
           const r = 3 + noise(x, y, i, 30) * 5;
           g.beginPath();
           g.arc(X(x) + 8 + noise(x, y, i, 31) * (px - 16), Y(y) + 8 + noise(x, y, i, 32) * (px - 16), r, 0, Math.PI * 2);
           g.fill();
         }
+      } else if (t === 'hill') {
+        mound(g, X(x), Y(y), px);
+        grain(g, x, y, X(x), Y(y), px, ['rgba(60,48,26,0.16)']);
+      } else {
+        // Lawn: a little worn here, a little lush there, so it does not read as flat vinyl.
+        grain(g, x, y, X(x), Y(y), px, ['rgba(24,70,26,0.16)', 'rgba(24,70,26,0.12)', 'rgba(196,232,140,0.1)']);
       }
     }
   }
@@ -127,6 +186,13 @@ function drawBoard(s: GameState): HTMLCanvasElement {
 
 /** The usual line of sight: from the target up and towards the camera. */
 export const VIEW_DIR = new THREE.Vector3(0, 20.6, 24.5).normalize();
+/** The four corners of the board, as fractions of its half-width. */
+const CORNERS: ReadonlyArray<readonly [number, number]> = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1],
+];
 /** Eye-to-target distance at which the medium board fills the view. */
 const OVERVIEW = Math.hypot(20.6, 24.5);
 /** The title screen looks from lower down, so the bases and woods stand up against the sky. */
@@ -145,6 +211,8 @@ export class Scene {
   readonly overlay = new THREE.Group();
   private boardTop: THREE.Mesh | null = null;
   private boardBase: THREE.Mesh | null = null;
+  /** The map painted onto the board. Let go of with the board: it is the largest thing on the card. */
+  private boardTex: THREE.CanvasTexture | null = null;
   private tiles: THREE.Mesh[] = [];
   private tileMats = new Map<number, THREE.MeshBasicMaterial>();
   private hover: THREE.LineSegments;
@@ -159,6 +227,17 @@ export class Scene {
   private panning = false;
   /** The title screen is up: the board turns on its own and sits low in the window, under the title. */
   private turning = false;
+  /** Size of the picture, as last measured by `resize`. */
+  private viewW = 0;
+  private viewH = 0;
+  /** Width the gathering panel covers on the right, on top of the sidebar; 0 while it is down. */
+  private sideInset = 0;
+  /** That width as the picture sees it just now: it eases towards `sideInset`. */
+  private insetNow = 0;
+  /** The distance the whole board was last framed at, for keeping it all in view when the panel goes up or comes down. */
+  private framed = 0;
+  /** A stand-in for the eye when trying out how far back it has to sit (see `overviewDistance`). */
+  private spy: THREE.PerspectiveCamera | null = null;
 
   constructor(public canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -184,7 +263,16 @@ export class Scene {
     this.controls.screenSpacePanning = false;
     this.resetView();
 
-    const hemi = new THREE.HemisphereLight(0xd6e9ff, 0x2d472d, 1.15);
+    // Something for every glossy surface to reflect, armour and water above all: a sky
+    // that is blue overhead, pale at the horizon and dark ground below it.
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const sky = new THREE.Scene();
+    sky.add(new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16), new THREE.MeshBasicMaterial({ map: skyTexture(), side: THREE.BackSide })));
+    this.scene.environment = pmrem.fromScene(sky, 0.03).texture;
+    this.scene.environmentIntensity = 0.5;
+    pmrem.dispose();
+
+    const hemi = new THREE.HemisphereLight(0xd6e9ff, 0x2d472d, 0.7);
     this.sun = new THREE.DirectionalLight(0xfff1d6, 2.3);
     const sun = this.sun;
     sun.position.set(16, 28, 11);
@@ -262,20 +350,67 @@ export class Scene {
     return m;
   }
 
-  /** How far the eye sits from what it looks at when the whole board is in view. */
+  /**
+   * How far the eye sits from what it looks at when the whole board is in
+   * view: the usual distance, or further back if the sidebar and the gathering
+   * panel between them leave too narrow a stretch of window for the board.
+   */
   get overviewDistance(): number {
-    return OVERVIEW * (this.size / 20);
+    const base = OVERVIEW * (this.size / 20);
+    // Under the title there is no sidebar, and on a narrow screen it lies along the bottom instead.
+    if (this.turning || this.viewW <= 860) return (this.framed = base);
+    // The width the picture may fill: short of the sidebar with its margin, the gathering panel, and a little air.
+    const room = this.viewW - 358 - this.insetNow - 48;
+    if (this.wholeBoardIn(base, room)) return (this.framed = base);
+    // Half-way between a distance that is too close and one that is sure to be far enough, until they meet.
+    let near = base;
+    let far = base * 3;
+    for (let i = 0; i < 14; i++) {
+      const mid = (near + far) / 2;
+      if (this.wholeBoardIn(mid, room)) far = mid;
+      else near = mid;
+    }
+    return (this.framed = far);
+  }
+
+  /** Would all four corners of the board land inside a strip `room` pixels wide, centred where the picture is centred, from `dist` away? */
+  private wholeBoardIn(dist: number, room: number): boolean {
+    // A stand-in for the eye, looking at the board's centre from the usual line of sight; it borrows the real projection.
+    this.spy ??= new THREE.PerspectiveCamera();
+    this.spy.position.copy(VIEW_DIR).multiplyScalar(dist);
+    this.spy.updateMatrixWorld();
+    this.spy.lookAt(0, 0, 0);
+    this.spy.updateMatrixWorld();
+    this.spy.projectionMatrix.copy(this.camera.projectionMatrix);
+    // The view offset slides the picture away from the window's middle, to the middle of the strip; measure from there.
+    const centre = (-2 * (this.camera.view?.offsetX ?? 0)) / this.viewW;
+    const half = this.size / 2;
+    const at = new THREE.Vector3();
+    for (const [x, z] of CORNERS) {
+      if (Math.abs(at.set(x * half, 0, z * half).project(this.spy).x - centre) > room / this.viewW) return false;
+    }
+    return true;
   }
 
   buildBoard(s: GameState): void {
+    // Everything that belonged to the last board goes with it. The picture is rebuilt every
+    // time a board is put on, the title screen's included, so nothing may be left behind.
     if (this.boardTop) {
       this.scene.remove(this.boardTop);
       this.boardTop.geometry.dispose();
       (this.boardTop.material as THREE.Material).dispose();
+      this.boardTex?.dispose();
     }
-    if (this.boardBase) this.scene.remove(this.boardBase);
-    if (this.decor) this.scene.remove(this.decor.group);
-    this.decor = new TerrainDecor(s);
+    if (this.boardBase) {
+      this.scene.remove(this.boardBase);
+      this.boardBase.geometry.dispose();
+      (this.boardBase.material as THREE.Material).dispose();
+    }
+    if (this.decor) {
+      this.scene.remove(this.decor.group);
+      this.decor.dispose();
+    }
+    this.decor = new TerrainDecor(s, this.sun.position);
     this.scene.add(this.decor.group);
     this.size = s.boardSize;
     const n = s.boardSize;
@@ -290,10 +425,10 @@ export class Scene {
     this.sun.shadow.camera.updateProjectionMatrix();
     this.controls.maxDistance = this.overviewDistance * 1.7;
 
-    const tex = new THREE.CanvasTexture(drawBoard(s));
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    this.boardTop = new THREE.Mesh(new THREE.PlaneGeometry(n, n), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+    this.boardTex = new THREE.CanvasTexture(drawBoard(s));
+    this.boardTex.colorSpace = THREE.SRGBColorSpace;
+    this.boardTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    this.boardTop = new THREE.Mesh(new THREE.PlaneGeometry(n, n), new THREE.MeshStandardMaterial({ map: this.boardTex, roughness: 0.92 }));
     this.boardTop.rotation.x = -Math.PI / 2;
     this.boardTop.receiveShadow = true;
     this.boardBase = new THREE.Mesh(new THREE.BoxGeometry(n + 0.7, 0.6, n + 0.7), new THREE.MeshStandardMaterial({ color: 0x1a2130, roughness: 0.85 }));
@@ -420,13 +555,30 @@ export class Scene {
   }
 
   resize(): void {
-    const w = this.canvas.clientWidth || window.innerWidth;
-    const h = this.canvas.clientHeight || window.innerHeight;
-    this.renderer.setSize(w, h, false);
+    this.viewW = this.canvas.clientWidth || window.innerWidth;
+    this.viewH = this.canvas.clientHeight || window.innerHeight;
+    this.renderer.setSize(this.viewW, this.viewH, false);
     // Pull back on narrow screens so the whole square still fits.
-    this.camera.fov = w / h < 1 ? 58 : 42;
-    // The HUD covers part of the window: slide the picture so the board is
-    // centred in the part the player can actually see.
+    this.camera.fov = this.viewW / this.viewH < 1 ? 58 : 42;
+    this.insetNow = this.sideInset;
+    this.applyViewOffset();
+  }
+
+  /**
+   * The gathering panel went up or came down: `px` is how much of the right
+   * edge it covers, on top of the sidebar. The board glides out of its way.
+   */
+  setSideInset(px: number): void {
+    this.sideInset = px;
+  }
+
+  /**
+   * Slides the picture so the board is centred in the part of the window the
+   * HUD leaves visible.
+   */
+  private applyViewOffset(): void {
+    const w = this.viewW;
+    const h = this.viewH;
     const sidebar = w > 860;
     let offX = 0;
     let offY = 0;
@@ -434,15 +586,27 @@ export class Scene {
       // Under the title: the board sinks towards the bottom edge.
       offY = -h * 0.25;
     } else {
-      offX = sidebar ? 179 : 0;
+      // Half of what the sidebar, and the gathering panel while it is up, cover on the right.
+      offX = sidebar ? 179 + this.insetNow / 2 : 0;
       offY = sidebar ? -40 : (h * 0.46 + 8) / 2;
     }
     this.camera.setViewOffset(w, h, offX, offY, w, h);
-    this.camera.updateProjectionMatrix();
   }
 
   render(): void {
     this.controls.update();
+    // The gathering panel's share of the window eases in and out, so the board glides rather than jumps.
+    if (this.insetNow !== this.sideInset) {
+      const framed = this.framed;
+      const d = this.sideInset - this.insetNow;
+      this.insetNow = Math.abs(d) < 0.5 ? this.sideInset : this.insetNow + d * 0.14;
+      this.applyViewOffset();
+      // A board that was all in view a moment ago stays all in view: the eye backs off as far as the panel now makes necessary.
+      const t = this.controls.target;
+      if (framed > 0 && t.lengthSq() < 1e-4 && Math.abs(this.camera.position.distanceTo(t) - framed) < 0.05) {
+        this.camera.position.sub(t).setLength(this.overviewDistance).add(t);
+      }
+    }
     // Panning may slide the board around, but never out from under the camera.
     const t = this.controls.target;
     const lim = this.size / 2 + 3;

@@ -1,12 +1,14 @@
 import { h } from './dom';
 import { glyph } from './icons';
-import { ALIEN_EVERY, ALIEN_KEYS } from '../game/data';
 import { SAVE_SLOTS, listSlots } from './saves';
 
 export interface HomeActions {
   newGame(): void;
   load(): void;
 }
+
+/** What the corner of the title screen says about this build. */
+const VERSION = 'Version 0.95 - 20261127';
 
 /** Button wording and picture, by which button it is. */
 const LABELS = { new: ['新游戏', 'NEW GAME', 'play'], load: ['加载存档', 'LOAD GAME', 'load'] } as const;
@@ -39,18 +41,17 @@ export class Home {
       h(
         'header',
         { class: 'home-top' },
-        h('div', { class: 'home-mark' }, h('b', {}, 'NC'), h('span', {}, '指挥台'), h('i', { class: 'sep' }), 'TACTICAL CONSOLE'),
+        h('div', { class: 'home-mark' }, h('img', { class: 'home-logo', src: '/logo.png', alt: 'NC WorldBattle' }), h('span', { class: 'home-version' }, VERSION)),
         h('div', { class: 'home-status' }, h('i', { class: 'home-pulse' }), '系统就绪', h('i', { class: 'sep' }), this.taken),
       ),
       h(
         'main',
         { class: 'home-main' },
-        h('div', { class: 'home-kicker' }, h('i'), h('span', {}, 'TURN-BASED 3D STRATEGY'), h('i')),
         h('h1', { class: 'home-title' }, h('b', {}, 'NC'), ' ', h('span', {}, 'WORLDBATTLE')),
         h('div', { class: 'home-rule' }),
-        h('p', { class: 'home-tagline' }, '掷骰争夺行动点', h('i'), '建设基地', h('i'), '决战终局'),
+        h('p', { class: 'home-tagline' }, 'RTS · 回合制 · 战略 · 多人游戏'),
         h('div', { class: 'home-actions' }, this.action('new'), this.action('load')),
-        h('p', { class: 'home-note' }, `2–4 名玩家 · 地图每局随机生成 · ${ALIEN_KEYS.length} 种外星人从第 ${ALIEN_EVERY[0]}–${ALIEN_EVERY[1]} 回合起陆续来袭`),
+        h('p', { class: 'home-note' }, '最多支持 4 名玩家同时对战'),
       ),
       h(
         'footer',

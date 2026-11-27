@@ -116,7 +116,7 @@ describe('建造与升级', () => {
     expect(countBuilding(p, 'barracks')).toBe(0);
   });
 
-  it('防御网只能建一座，可升级为高级防御网（防御值 2 → 5）', () => {
+  it('防御网只能建一座，可升级 4 次：每次消耗是上一次的 150%，抵扣每两级翻倍', () => {
     const s = newGame();
     const p = toTurn(s);
     rich(p);
@@ -124,10 +124,41 @@ describe('建造与升级', () => {
     const net = build(s, 'defenseNet');
     expect(netDefense(p)).toBe(2);
     expect(tryApply(s, { type: 'BUILD', key: 'defenseNet' })).toContain('已建有');
-    apply(s, { type: 'UPGRADE', buildingId: net.id });
-    expect(net.level).toBe(2);
-    expect(netDefense(p)).toBe(5);
+    const ladder = BUILDINGS.defenseNet.levels;
+    expect(ladder).toHaveLength(5);
+    // One upgrade per rung: each costs exactly what the table says and absorbs what it says.
+    const paid = [ladder[0].cost.ore!];
+    for (let i = 1; i < ladder.length; i++) {
+      const before = p.resources.ore;
+      apply(s, { type: 'UPGRADE', buildingId: net.id });
+      expect(net.level).toBe(i + 1);
+      expect(before - p.resources.ore).toBe(ladder[i].cost.ore);
+      expect(netDefense(p)).toBe(ladder[i].defense);
+      paid.push(ladder[i].cost.ore!);
+    }
+    // 150% of the one before it, give or take the rounding to 5.
+    for (let i = 1; i < paid.length; i++) expect(paid[i] / paid[i - 1]).toBeCloseTo(1.5, 2);
+    expect(paid).toEqual([300, 450, 675, 1015, 1520]);
+    // Twice what two rungs down absorbs.
+    for (let i = 2; i < ladder.length; i++) expect(ladder[i].defense).toBe(ladder[i - 2].defense * 2);
+    expect(ladder.map((l) => l.defense)).toEqual([2, 3, 4, 6, 8]);
     expect(tryApply(s, { type: 'UPGRADE', buildingId: net.id })).toBe('已是最高等级');
+    // A force field has no walls to thicken.
+    expect([net.hp, net.maxHp]).toEqual([0, 0]);
+  });
+
+  it('升级资源不足时拒绝且不扣钱；下次资源够了才能接着升', () => {
+    const s = newGame();
+    const p = toTurn(s);
+    rich(p);
+    build(s, 'powerPlant');
+    const net = build(s, 'defenseNet');
+    p.resources.ore = 449;
+    expect(tryApply(s, { type: 'UPGRADE', buildingId: net.id })).toBe('资源不足');
+    expect([net.level, p.resources.ore, netDefense(p)]).toEqual([1, 449, 2]);
+    p.resources.ore = 450;
+    apply(s, { type: 'UPGRADE', buildingId: net.id });
+    expect([net.level, p.resources.ore, netDefense(p)]).toEqual([2, 0, 3]);
   });
 
   it('炮台 → 重型炮台，防空炮 → 毒刺防空炮', () => {

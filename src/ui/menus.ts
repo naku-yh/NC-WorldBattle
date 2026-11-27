@@ -2,6 +2,7 @@ import type { GameState } from '../game/types';
 import { focusInside, h, keepFocusIn, sheen } from './dom';
 import { glyph, type Glyph } from './icons';
 import type { Overlays } from './overlays';
+import { rulesPanel } from './rules';
 import { eraseSave, infoOf, listSlots, readSave } from './saves';
 import { slotList } from './slots';
 
@@ -43,21 +44,28 @@ function item(label: string, icon: Glyph, cls: string, note: { text: string; key
   return b;
 }
 
-/** A sheet of glass over the board. What goes on it scrolls on a short screen; the glass stays put. */
+/**
+ * A sheet of glass over the board. What goes on it scrolls on a short screen; the glass stays put.
+ * (`menu-card`, not `card`: that one is the little unit card along the bottom, and its flex row
+ * would squeeze this sheet to the width of its own buttons.)
+ */
 function sheetOf(label: string): { veil: HTMLElement; sheet: HTMLElement } {
   const sheet = h('div', { class: 'sheet' });
-  const veil = h('div', { class: 'veil pause' }, h('div', { class: 'glass card', role: 'dialog', 'aria-modal': 'true', 'aria-label': label }, sheet));
+  const veil = h('div', { class: 'veil pause' }, h('div', { class: 'glass menu-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': label }, sheet));
   return { veil, sheet };
 }
 
+/** What the pause menu shows: its own list, the save slots, or the rulebook. */
+type Level = 'main' | 'save' | 'rules';
+
 /**
  * Esc during a match: a sheet of glass over the frozen board with the ways
- * out of it. "保存存档" turns the sheet over to the three slots.
+ * out of it. "保存存档" turns the sheet over to the three slots, "玩法" to the rulebook.
  */
 export class PauseMenu {
   private veil: HTMLElement | null = null;
   private sheet: HTMLElement | null = null;
-  private level: 'main' | 'save' = 'main';
+  private level: Level = 'main';
   /** The slot just written to, so its row can say so. */
   private justSaved: number | null = null;
   private forget: (() => void) | null = null;
@@ -88,10 +96,15 @@ export class PauseMenu {
     this.draw('main');
   }
 
+  /** The rulebook, on the back of the menu. Does nothing while the menu is down. */
+  showRules(): void {
+    if (this.veil) this.draw('rules');
+  }
+
   /** Esc: one step back, and out of the menu when there is none. */
   back(): void {
     if (!this.veil) return;
-    if (this.level === 'save') this.draw('main');
+    if (this.level !== 'main') this.draw('main');
     else this.a.resume();
   }
 
@@ -103,13 +116,16 @@ export class PauseMenu {
     this.veil = this.sheet = null;
   }
 
-  private draw(level: 'main' | 'save'): void {
+  private draw(level: Level): void {
     const sheet = this.sheet;
-    if (!sheet) return;
+    if (!sheet || !this.veil) return;
     this.level = level;
-    const body = level === 'main' ? this.main() : this.saver();
+    // The rulebook has tables in it: it gets a wider pane of glass than the list of buttons.
+    this.veil.firstElementChild?.classList.toggle('wide', level === 'rules');
+    const body = level === 'main' ? this.main() : level === 'save' ? this.saver() : this.book();
     body.classList.add('swap');
     sheet.replaceChildren(body);
+    sheet.scrollTop = 0;
     focusInside(sheet);
   }
 
@@ -126,9 +142,22 @@ export class PauseMenu {
         info ? h('div', { class: 'pause-sub' }, h('span', { class: 'dot', style: `--c:${info.color}` }), info.turn, h('i', { class: 'sep' }), info.moment) : null,
       ),
       item('继续游戏', 'play', 'amber', { text: 'Esc', key: true }, () => this.a.resume()),
+      item('玩法', 'book', '', { text: '规则、操作与消耗一览' }, () => this.draw('rules')),
       item('保存存档', 'save', '', { text: mySave(this.a) }, () => this.draw('save')),
       item('重新开始', 'restart', '', { text: '同一设置，新地图' }, () => void this.restart()),
       item('退出到首页', 'quit', 'danger', null, () => void this.quit()),
+    );
+  }
+
+  /** The rulebook: the same fold-out sections the sidebar used to carry, on a darker pane so the small print stays legible over the board. */
+  private book(): HTMLElement {
+    const back = h('button', { class: 'gbtn round', title: '返回菜单（Esc）', html: glyph('back') });
+    back.onclick = () => this.back();
+    return h(
+      'div',
+      { class: 'pause-body' },
+      h('div', { class: 'pause-head with-back' }, back, h('div', {}, h('div', { class: 'pause-title' }, '玩法'), h('div', { class: 'pause-sub' }, '对局已暂停，慢慢看'))),
+      h('div', { class: 'rules-sheet' }, rulesPanel()),
     );
   }
 

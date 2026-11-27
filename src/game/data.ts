@@ -375,15 +375,20 @@ export const BUILDINGS: Record<BuildingKey, BuildingDef> = {
   defenseNet: {
     key: 'defenseNet',
     name: '防御网',
-    desc: '覆盖整个基地：敌方每单位每次攻击先被抵扣 2 点攻击力。',
+    desc: '覆盖整个基地的力场穹顶：敌方每单位每次攻击先被抵扣 2 点攻击力。可升级 4 次，抵扣逐级提高。',
     w: 0,
     h: 0,
     hp: 0,
     needsPower: true,
     providesPower: 0,
+    // Five rungs. Each upgrade costs 150% of the one before it (rounded to 5);
+    // what the net absorbs doubles every two rungs.
     levels: [
       { name: '防御网', cost: { ore: 300 }, defense: 2, attack: 0, shots: 0, range: 0 },
-      { name: '高级防御网', cost: { ore: 500, oil: 300 }, defense: 5, attack: 0, shots: 0, range: 0 },
+      { name: '强化防御网', cost: { ore: 450 }, defense: 3, attack: 0, shots: 0, range: 0 },
+      { name: '高级防御网', cost: { ore: 675 }, defense: 4, attack: 0, shots: 0, range: 0 },
+      { name: '超级防御网', cost: { ore: 1015 }, defense: 6, attack: 0, shots: 0, range: 0 },
+      { name: '终极防御网', cost: { ore: 1520 }, defense: 8, attack: 0, shots: 0, range: 0 },
     ],
     canHit: [],
     produces: [],

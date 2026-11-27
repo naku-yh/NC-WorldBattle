@@ -63,6 +63,7 @@ import type {
   Building,
   BuildingDef,
   BuildingKey,
+  BuildingLevel,
   CombatStats,
   Cost,
   DiceEntry,
@@ -127,9 +128,9 @@ export function createGame(cfg: GameConfig): GameState {
     };
     const p: PlayerState = {
       id: i,
-      name: PLAYER_NAMES[i],
+      name: cfg.names?.[i]?.trim() || PLAYER_NAMES[i],
       kind,
-      color: PLAYER_COLORS[i],
+      color: cfg.colors?.[i] || PLAYER_COLORS[i],
       alive: true,
       corner: seatOf(i),
       resources: { ...START_RESOURCES },
@@ -373,13 +374,19 @@ export function canProduce(s: GameState, p: PlayerState, uk: UnitKey): string | 
   return null;
 }
 
+/** The rung above the one `b` stands on, or null at the top of its ladder. */
+export function nextLevelOf(b: Building): BuildingLevel | null {
+  const ladder = BUILDINGS[b.key].levels;
+  return b.level < ladder.length ? ladder[b.level] : null;
+}
+
 export function canUpgrade(p: PlayerState, id: number): string | null {
   const b = p.buildings.find((x) => x.id === id);
   if (!b) return '建筑不存在';
   const def = BUILDINGS[b.key];
-  if (def.levels.length < 2) return '该建筑无法升级';
-  if (b.level >= 2) return '已是最高等级';
-  if (!canAfford(p, def.levels[1].cost)) return '资源不足';
+  const next = nextLevelOf(b);
+  if (!next) return def.levels.length < 2 ? '该建筑无法升级' : '已是最高等级';
+  if (!canAfford(p, next.cost)) return '资源不足';
   return null;
 }
 
@@ -1191,12 +1198,16 @@ export function reduce(s: GameState, a: Action): Result {
         else {
           const b = p.buildings.find((x) => x.id === a.buildingId)!;
           const def = BUILDINGS[b.key];
-          pay(p, def.levels[1].cost);
-          b.level = 2;
-          b.maxHp += UPGRADE_HP_BONUS;
-          b.hp += UPGRADE_HP_BONUS;
+          const next = nextLevelOf(b)!;
+          pay(p, next.cost);
+          b.level++;
+          // A force field has no walls to thicken; everything else is reinforced by its upgrade.
+          if (def.hp > 0) {
+            b.maxHp += UPGRADE_HP_BONUS;
+            b.hp += UPGRADE_HP_BONUS;
+          }
           events.push({ type: 'upgrade', player: p.id, buildingId: b.id });
-          addLog(s, `${p.name} 升级为${def.levels[1].name}`, 'good', p.id);
+          addLog(s, `${p.name} 升级为${next.name}`, 'good', p.id);
           if (b.key === 'hq') expandBase(s, p, b, events);
         }
       }

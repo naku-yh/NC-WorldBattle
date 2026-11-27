@@ -96,7 +96,7 @@ export interface BuildingDef {
   needsPower: boolean;
   /** Power slots this building provides. */
   providesPower: number;
-  /** [level 1, level 2 (upgrade)] */
+  /** Rung 1 is what gets built; every rung after it is one upgrade. */
   levels: BuildingLevel[];
   canHit: TargetClass[];
   produces: UnitKey[];
@@ -112,7 +112,8 @@ export interface BuildingDef {
 export interface Building {
   id: number;
   key: BuildingKey;
-  level: 1 | 2;
+  /** 1-based rung on the ladder in `BuildingDef.levels`: 1 is what gets built, each one after it an upgrade. */
+  level: number;
   hp: number;
   maxHp: number;
   /** Anchor = top-left tile in board coordinates. */
@@ -347,6 +348,10 @@ export type Action =
 export interface GameConfig {
   /** One entry per player: seat 0 first. 2–4 entries. */
   seats: ('human' | 'ai')[];
+  /** What each seat is called, when the player has typed anything in; otherwise the default names. */
+  names?: string[];
+  /** Each seat's colour, when it has been picked; otherwise the defaults. */
+  colors?: string[];
   totalTurns: number;
   seed?: number;
   /** Board edge in tiles. Defaults to the medium map. */

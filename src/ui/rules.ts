@@ -1,11 +1,19 @@
 import { ALIENS, ALIEN_CAP, ALIEN_EVERY, ALIEN_KEYS, BUILDABLE, BUILDINGS, MAP_SIZES, MIN_TURNS, RESOURCES, SCORE_BUILDING, SCORE_LAST_HIT, SPIDERLING, TERRAIN, UNITS } from '../game/data';
-import type { AlienKey, Cost, ResourceKey, Terrain, UnitKey } from '../game/types';
+import type { AlienKey, BuildingDef, Cost, ResourceKey, Terrain, UnitKey } from '../game/types';
 import { h } from './dom';
 import { alienIcon, buildingIcon, icon, iconBox, spiderIcon, terrainIcon, unitIcon } from './icons';
 
 const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
 
 export const costText = (c: Cost): string => RES_KEYS.filter((k) => c[k]).map((k) => `${RESOURCES[k].name} ${c[k]}`).join(' ');
+
+/** Every rung above the first with its price: "重型炮台（500 矿 300 油）", or the whole ladder for the net. */
+const upgradeText = (d: BuildingDef): string => d.levels.slice(1).map((l) => `${l.name}（${costText(l.cost)}）`).join(' → ') || '—';
+
+/** The defense net's ladder: what each rung absorbs, "2 / 3 / 4 / 6 / 8". */
+const NET = BUILDINGS.defenseNet.levels;
+const NET_ABSORB = NET.map((l) => l.defense).join(' / ');
+const NET_RULE = `罩住整个基地（一层半透明的穹顶）：基地内所有建筑每次受击先抵扣它的防御值。共 ${NET.length} 级、可升级 ${NET.length - 1} 次，逐级抵扣 ${NET_ABSORB} 点攻击力；每次升级的花费是上一次的 150%。`;
 
 /** One-line summary of what a building does, shown next to its name. */
 export function effectOf(k: keyof typeof BUILDINGS): string {
@@ -19,7 +27,7 @@ export function effectOf(k: keyof typeof BUILDINGS): string {
     case 'factory':
       return `运输车容量 +${d.capPerBuilding}`;
     case 'defenseNet':
-      return `基地防御 +${l.defense}`;
+      return `基地防御 +${l.defense}（共 ${d.levels.length} 级）`;
     case 'barracks':
       return `每回合 ${d.perTurnCap} 名`;
     case 'warFactory':
@@ -61,9 +69,8 @@ const ALIENS_HTML = `<h3>外星人</h3>
 function rulesHtml(): string {
   const buildings = [BUILDINGS.hq, ...BUILDABLE.map((k) => BUILDINGS[k])]
     .map((d) => {
-      const up = d.levels[1];
       const k = d.key;
-      return `<tr><td>${d.levels[0].name}</td><td>${costText(d.levels[0].cost)}</td><td>${effectOf(k)}</td><td>${up ? `${up.name}（${costText(up.cost)}）` : '—'}</td></tr>`;
+      return `<tr><td>${d.levels[0].name}</td><td>${costText(d.levels[0].cost)}</td><td>${effectOf(k)}</td><td>${upgradeText(d)}</td></tr>`;
     })
     .join('');
   const units = (Object.keys(UNITS) as UnitKey[])
@@ -95,7 +102,7 @@ ${GOAL_HTML}
 <h3>战斗</h3>
 <ul>
   <li>伤害 = 攻击力 − 防御值（最低 0）。<b>破甲</b>武器无视防御值。</li>
-  <li><b>防御网</b>让基地内所有建筑每次受击抵扣 2 点攻击力，高级防御网抵扣 5 点。</li>
+  <li><b>防御网</b>${NET_RULE}</li>
   <li>只有防空武器（防空坦克、防空炮）能击落战斗机；防空炮只打空中目标。</li>
   <li>敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。</li>
 </ul>
@@ -120,12 +127,12 @@ const b = (text: string): HTMLElement => h('b', {}, text);
 /** A short version of the rules for the sidebar; the tables live in fold-outs. */
 export function rulesPanel(): HTMLElement {
   const buildingRows = [BUILDINGS.hq, ...BUILDABLE.map((k) => BUILDINGS[k])].map((d) => {
-    const up = d.levels[1];
+    const ups = d.levels.slice(1).map((l) => costText(l.cost));
     return h(
       'div',
       { class: 'rule-row' },
       iconBox(buildingIcon(d.key, 1)),
-      h('div', { class: 'info' }, h('div', { class: 'name' }, d.levels[0].name, h('span', { class: 'tag' }, effectOf(d.key))), h('div', { class: 'sub' }, costText(d.levels[0].cost) + (up ? ` · 升级 ${costText(up.cost)}` : ''))),
+      h('div', { class: 'info' }, h('div', { class: 'name' }, d.levels[0].name, h('span', { class: 'tag' }, effectOf(d.key))), h('div', { class: 'sub' }, costText(d.levels[0].cost) + (ups.length ? ` · 升级 ${ups.join(' → ')}` : ''))),
     );
   });
   const unitRows = (Object.keys(UNITS) as UnitKey[]).map((k) => {
@@ -169,6 +176,7 @@ export function rulesPanel(): HTMLElement {
         'ul',
         {},
         ...RES_KEYS.map((k) => li(h('span', { class: 'ico', style: `color:${RESOURCES[k].color}`, html: icon(k) }), `${RESOURCES[k].name}：${RESOURCES[k].hint}`)),
+        li('有行动点的回合，右侧栏左边会摆出', b('采集面板'), '：对着右边的消耗，点一种资源就采一种。行动点用完、或轮到别人时，面板自己收起。'),
         li('每座', b('加工工厂'), '最多 4 台运输车；开局有 1 台。'),
         li('每座', b('发电站'), '供 3 座建筑，按建造顺序分配；断电的建筑不能生产、开火，防御网失效。'),
       ),
@@ -176,13 +184,21 @@ export function rulesPanel(): HTMLElement {
     section(
       '建造与生产',
       true,
-      h('ul', {}, li('在“建造”页选一座建筑，再', b('点击自己领地里的格子'), '放置（绿色高亮的是可建的位置）。'), li(`在“建筑”页可以把${b('军事基地')}升级为${BUILDINGS.hq.levels[1].name}（${costText(BUILDINGS.hq.levels[1].cost)}）：领地向战场方向扩大一圈，多出一批可建的格子。`), li('军营、军工厂每回合各最多产出 4 个；每座机场停靠 4 架战斗机。'), li('新单位可以立即行动。')),
+      h(
+        'ul',
+        {},
+        li('在“建造”页选一座建筑，再', b('点击自己领地里的格子'), '放置（绿色高亮的是可建的位置）。'),
+        li('“生产”页', b('只列出已建成的建筑能生产的单位'), '：没建军营，就看不到步兵、狙击手和反坦克战士。'),
+        li('在“建筑”页可以把', b('军事基地'), `升级为${BUILDINGS.hq.levels[1].name}（${costText(BUILDINGS.hq.levels[1].cost)}）：领地向战场方向扩大一圈，多出一批可建的格子。`),
+        li('军营、军工厂每回合各最多产出 4 个；每座机场停靠 4 架战斗机。'),
+        li('新单位可以立即行动。'),
+      ),
     ),
     section('地形', true, h('p', {}, '每局随机生成：一条水道横贯战场，上面有两座桥；另有湖泊、树林和山地。加成只作用于站在上面的单位。'), ...groundRows),
     section(
       '战斗',
       false,
-      h('ul', {}, li('伤害 = 攻击力 − 防御值（最低 0）；', b('破甲'), '武器无视防御值。'), li(b('防御网'), '让基地内所有建筑每次受击抵扣 2 点攻击力，高级防御网抵扣 5 点。'), li('只有防空武器（防空坦克、防空炮）能击落战斗机。'), li('敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。')),
+      h('ul', {}, li('伤害 = 攻击力 − 防御值（最低 0）；', b('破甲'), '武器无视防御值。'), li(b('防御网'), NET_RULE), li('只有防空武器（防空坦克、防空炮）能击落战斗机。'), li('敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。')),
     ),
     section(
       '外星人',
@@ -195,12 +211,12 @@ export function rulesPanel(): HTMLElement {
     section(
       '操作',
       false,
-      h('ul', {}, li('左键：选择单位 / 建筑下达命令；点击空地查看地块。'), li('拖动：旋转视角；滚轮：缩放；', b('按住空格拖动'), '或右键拖动：平移地图。'), li(b('点击左上角小地图'), '：回到全局视角。'), li('右键：取消选择，或放弃放置建筑。'), li('Tab：下一个待命单位；E：结束回合；1–5：切换页签。')),
+      h('ul', {}, li('左键：选择单位 / 建筑下达命令；点击空地查看地块。'), li('拖动：旋转视角；滚轮：缩放；', b('按住空格拖动'), '或右键拖动：平移地图。'), li(b('点击左上角小地图'), '：回到全局视角。'), li('右键：取消选择，或放弃放置建筑。'), li('Tab：下一个待命单位；E：结束回合；1 / 2 / 3：切换右侧栏的建造 / 生产 / 建筑页。')),
     ),
     section(
       '暂停与存档',
       false,
-      h('ul', {}, li(b('Esc'), '或顶栏的“菜单”：暂停游戏并弹出菜单，再按一次继续。'), li('菜单里可以', b('保存存档'), '、', b('重新开始'), '（同样的设置开一局新地图）和', b('退出到首页'), '。'), li('共 3 个存档位，保存当时的全部进度，包括下到一半的回合和电脑玩家的回合。'), li('首页的“加载存档”可以接着任意一份继续。'), li('存档只保存在这台电脑的这个浏览器里，清除浏览器数据会一并删除。')),
+      h('ul', {}, li(b('Esc'), '或顶栏的“菜单”：暂停游戏并弹出菜单，再按一次继续。'), li('菜单里可以', b('看玩法'), '（就是这一页）、', b('保存存档'), '、', b('重新开始'), '（同样的设置开一局新地图）和', b('退出到首页'), '。'), li('共 3 个存档位，保存当时的全部进度，包括下到一半的回合和电脑玩家的回合。'), li('首页的“加载存档”可以接着任意一份继续。'), li('存档只保存在这台电脑的这个浏览器里，清除浏览器数据会一并删除。')),
     ),
     section('建筑与消耗', false, ...buildingRows),
     section('单位与消耗', false, ...unitRows),
