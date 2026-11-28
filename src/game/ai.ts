@@ -1,7 +1,7 @@
 import { ALIENS, BUILDINGS, SPIDERLING, TRUCKS_PER_FACTORY, UNITS } from './data';
-import { alienById, attackPower, attackTargets, baseStats, buildingById, canAfford, canBuild, canProduce, canUpgrade, countBuilding, defenseOf, hqOf, statsOf, unitById } from './engine';
+import { alienById, attackOn, attackPower, attackTargets, baseStats, buildingById, canAfford, canBuild, canProduce, canUpgrade, countBuilding, defenseOf, hqOf, statsOf, unitById } from './engine';
 import { BoardIndex, buildingCenter, cheb, key, moveModeOf, nearestOpen, reachable, route, toWorld, withinRange } from './board';
-import type { Action, Building, BuildingKey, CombatStats, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Unit, UnitKey } from './types';
+import type { Action, Building, BuildingKey, CombatStats, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, TargetClass, Unit, UnitKey } from './types';
 
 const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
 
@@ -13,10 +13,11 @@ const WAVE_STRENGTH = 16;
  */
 const STAGE = 6;
 
-/** Damage one full attack with these stats does to something with `defense` HP of armour. */
-export function damageOf(st: CombatStats, defense: number): number {
+/** Damage one full attack with these stats does to a target with `defense` HP of armour, of class `cls`. */
+export function damageOf(st: CombatStats, defense: number, cls: TargetClass = 'ground'): number {
   let n = 0;
-  for (let i = 0; i < st.shots; i++) n += Math.max(0, st.attack - (st.pierce ? 0 : defense));
+  const attack = attackOn(st, cls);
+  for (let i = 0; i < st.shots; i++) n += Math.max(0, attack - (st.pierce ? 0 : defense));
   return n;
 }
 
@@ -124,10 +125,10 @@ function produceUnit(s: GameState, p: PlayerState, reserve: Cost): Action | null
 }
 
 /** Lower is a more attractive target. */
-function scoreTarget(s: GameState, hurt: (defense: number) => number, t: EntityRef): number {
+function scoreTarget(s: GameState, hurt: (defense: number, cls: TargetClass) => number, t: EntityRef): number {
   // An alien that this weapon can actually hurt comes before everything.
-  if (t.kind === 'alien') return hurt(ALIENS[alienById(s, t.id)?.key ?? 'chloe'].defense) > 0 ? 0 : 9;
-  if (t.kind === 'spider') return hurt(SPIDERLING.defense) > 0 ? 0.5 : 9;
+  if (t.kind === 'alien') return hurt(ALIENS[alienById(s, t.id)?.key ?? 'chloe'].defense, 'ground') > 0 ? 0 : 9;
+  if (t.kind === 'spider') return hurt(SPIDERLING.defense, 'ground') > 0 ? 0.5 : 9;
   if (t.kind === 'building') {
     const hit = buildingById(s, t.id);
     if (!hit) return 9;
@@ -138,10 +139,10 @@ function scoreTarget(s: GameState, hurt: (defense: number) => number, t: EntityR
   const hit = unitById(s, t.id);
   if (!hit) return 9;
   // The ground a unit stands on counts towards its armour.
-  return hurt(defenseOf(s, hit.unit)) >= hit.unit.hp ? 1 : 3;
+  return hurt(defenseOf(s, hit.unit), UNITS[hit.unit.key].unitClass) >= hit.unit.hp ? 1 : 3;
 }
 
-function bestTarget(s: GameState, hurt: (defense: number) => number, list: EntityRef[]): EntityRef {
+function bestTarget(s: GameState, hurt: (defense: number, cls: TargetClass) => number, list: EntityRef[]): EntityRef {
   let best = list[0];
   let bestScore = Infinity;
   for (const t of list) {
@@ -256,7 +257,7 @@ function combat(s: GameState, p: PlayerState): Action | null {
     const list = attackTargets(s, { kind: 'unit', id: u.id });
     if (list.length) {
       const st = statsOf(s, u);
-      return { type: 'ATTACK', source: { kind: 'unit', id: u.id }, target: bestTarget(s, (def) => damageOf(st, def), list) };
+      return { type: 'ATTACK', source: { kind: 'unit', id: u.id }, target: bestTarget(s, (def, cls) => damageOf(st, def, cls), list) };
     }
   }
   for (const b of p.buildings) {

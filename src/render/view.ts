@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { ALIENS, SPIDERLING, UNITS } from '../game/data';
-import { alienById, buildingById, spiderById, unitById } from '../game/engine';
+import { ALIENS, BUILDINGS, SPIDERLING, UNITS } from '../game/data';
+import { alienById, buildingById, canStillAct, spiderById, statsOf, unitById } from '../game/engine';
 import { DEPOT_LOCAL, supplyRoute, tilesOf, toLocal, toWorld, zoneSize } from '../game/board';
 import type { AlienState, Building, GameEvent, GameState, PlayerState, Pt, Spiderling, Unit } from '../game/types';
 import { ShieldDome } from './dome';
@@ -76,6 +76,95 @@ function selectionMark(): THREE.Group {
   return g;
 }
 
+/** How high the circle of a weapon's reach lies above the board: over the tile highlights and their outlines, like the selection ring. */
+const REACH_Y = 0.1;
+/** The reach of a unit or gun belonging to the player whose turn it is, and of everyone else's. */
+const OWN_REACH = 0xf5b83d;
+const FOE_REACH = 0xef4444;
+
+/**
+ * The circle drawn on the ground round whatever is selected or looked at,
+ * showing how far its weapon reaches: a faint wash over the ground inside it
+ * and a bright band on the rim. The circle is only drawn again when its radius
+ * changes; it follows its unit round the board every frame.
+ */
+class ReachRing {
+  readonly group = new THREE.Group();
+  private wash = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.06, depthWrite: false });
+  private ink = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.92, depthWrite: false });
+  private inside = new THREE.Mesh(new THREE.BufferGeometry(), this.wash);
+  private band = new THREE.Mesh(new THREE.BufferGeometry(), this.ink);
+  private radius = 0;
+
+  constructor() {
+    for (const m of [this.inside, this.band]) {
+      m.rotation.x = -Math.PI / 2;
+      m.renderOrder = 4;
+      this.group.add(m);
+    }
+    this.group.position.y = REACH_Y;
+    this.group.visible = false;
+  }
+
+  /** Puts the circle up, `r` world units across from the middle, in the colour of whose reach it is; `null` takes it down. */
+  set(r: number | null, color: number): void {
+    if (r === null) {
+      this.group.visible = false;
+      this.radius = 0;
+      return;
+    }
+    this.group.visible = true;
+    this.wash.color.setHex(color);
+    this.ink.color.setHex(color);
+    if (r === this.radius) return;
+    this.radius = r;
+    this.inside.geometry.dispose();
+    this.band.geometry.dispose();
+    this.inside.geometry = new THREE.CircleGeometry(r, 96);
+    this.band.geometry = new THREE.RingGeometry(r - 0.045, r + 0.045, 128);
+  }
+
+  /** The band breathes, slowly, so that the eye finds it on grass and on concrete alike. */
+  tick(clock: number): void {
+    if (this.group.visible) this.ink.opacity = 0.8 + Math.sin(clock * 2.6) * 0.16;
+  }
+
+  dispose(): void {
+    this.inside.geometry.dispose();
+    this.band.geometry.dispose();
+    this.wash.dispose();
+    this.ink.dispose();
+  }
+}
+
+/**
+ * Stone-coloured stand-ins for the materials a spent unit is shown in: one
+ * per material, shared the way the materials themselves are. Each keeps a
+ * shade of how light or dark the colour it stands in for was, so that a tank
+ * in stone is still a tank and not one grey lump.
+ */
+const stone = new WeakMap<THREE.Material, THREE.Material>();
+function stoneOf(m: THREE.Material): THREE.Material {
+  let s = stone.get(m);
+  if (!s) {
+    if (m instanceof THREE.MeshStandardMaterial) {
+      const hex = m.color.getHex();
+      const tone = (0.2126 * ((hex >> 16) & 255) + 0.7152 * ((hex >> 8) & 255) + 0.1144 * (hex & 255)) / 255;
+      const grey = Math.round(255 * (0.26 + 0.5 * tone));
+      const copy = m.clone();
+      copy.color.setHex((grey << 16) | (grey << 8) | grey);
+      copy.emissive.setHex(0x000000);
+      // Nothing left to gleam: dull and unmetallic, like carved stone.
+      copy.roughness = 0.92;
+      copy.metalness = 0.02;
+      copy.envMapIntensity = 0.25;
+      s = copy;
+    } else s = m;
+    stone.set(m, s);
+  }
+  return s;
+}
+
 /**
  * Little health bar that always faces the camera: what is left, in green, amber
  * or red, over what is gone in dark red, inside a pale frame. The three layers
@@ -148,6 +237,8 @@ interface View {
   pop: number;
   /** Whose building it is, for the glass over their base. */
   owner?: number;
+  /** Shown in stone: it has nothing left to do in the turn being played. */
+  spent: boolean;
   /** The chimneys, if it has any. */
   steam?: Steam;
 }
@@ -212,6 +303,11 @@ export class GameView {
   private state: GameState | null = null;
   private waiters: Array<() => void> = [];
   private wasIdle = true;
+  /** True while no move or fight was playing out at the end of the last frame. */
+  private wasStill = true;
+  /** The unit, gun or alien whose reach is ringed on the board: the selection, or whatever is being looked at. */
+  private reachRef: Ref | null = null;
+  private reach = new ReachRing();
   private moving = 0;
   private popping = 0;
   private trucking = 0;
@@ -224,6 +320,8 @@ export class GameView {
     floaterLayer: HTMLElement,
   ) {
     scene.dynamic.add(this.fx.group, this.plumes.points);
+    // The reach circle lies on the board itself, so it goes with the board rather than with any entity.
+    scene.overlay.add(this.reach.group);
     this.floaters = new Floaters(floaterLayer, scene.camera);
   }
 
@@ -279,6 +377,8 @@ export class GameView {
     this.fx.clear();
     this.floaters.clear();
     this.selected = null;
+    this.reachRef = null;
+    this.reach.set(null, 0);
     this.scene.buildBoard(s);
     this.scene.setHighlights([]);
     for (const node of s.nodes) {
@@ -291,6 +391,8 @@ export class GameView {
       if (model.motion?.length) this.animated.push({ root: model.group, model });
     }
     this.reconcile(s);
+    // A file read back may be half-way through a turn, with units in it that have already done their bit.
+    this.syncSpent(s);
   }
 
   private colorOf(s: GameState, pid: number): number {
@@ -320,7 +422,7 @@ export class GameView {
     if (pop) root.scale.setScalar(0.01);
     this.scene.dynamic.add(root);
     this.pickables.push(hit);
-    const v: View = { key, kind, id, root, model, hp, hit, mark, path: [], speed: 6, heading: 0, aim: null, aimT: 0, hover: 0, phase: Math.random() * 6.28, pop: pop ? 0 : 1 };
+    const v: View = { key, kind, id, root, model, hp, hit, mark, path: [], speed: 6, heading: 0, aim: null, aimT: 0, hover: 0, phase: Math.random() * 6.28, pop: pop ? 0 : 1, spent: false };
     if (model.motion?.length) this.animated.push({ root, model });
     if (pop) this.popping++;
     this.views.set(key, v);
@@ -674,6 +776,81 @@ export class GameView {
     // is built or raised a rung while the picture happens to be still.
     this.syncPower(s);
     this.syncNets(s);
+    // A turn that has just ended takes the stone off at once; the ground a unit has arrived on may reach further or less far.
+    this.syncSpent(s);
+    this.syncReach();
+  }
+
+  // -----------------------------------------------------------------------
+  // Spent units, and the reach of a weapon
+  // -----------------------------------------------------------------------
+
+  /** Shows a unit in its own colours again, or all in stone. The model's materials are swapped rather than changed: they are shared with every other model of the kind. */
+  private setSpent(v: View, on: boolean): void {
+    if (v.spent === on) return;
+    v.spent = on;
+    v.model.group.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (on) {
+        mesh.userData.paint = mesh.material;
+        mesh.material = stoneOf(mesh.material as THREE.Material);
+      } else if (mesh.userData.paint) {
+        mesh.material = mesh.userData.paint;
+        delete mesh.userData.paint;
+      }
+    });
+  }
+
+  /**
+   * Turns to stone whatever has nothing left to do in the turn being played,
+   * and only in that turn: the moment the turn ends the stone comes off, even
+   * though the unit's orders only come back when its owner's next turn begins.
+   * A unit that has only just finished is left in its colours until its own
+   * move or shot has played out.
+   */
+  private syncSpent(s: GameState): void {
+    const turn = s.phase === 'player' ? s.currentPlayer : -1;
+    for (const v of this.views.values()) {
+      if (v.kind !== 'unit') continue;
+      const hit = unitById(s, v.id);
+      const done = !!hit && hit.owner.id === turn && !canStillAct(hit.unit);
+      if (done && !v.spent && this.busy) continue;
+      this.setSpent(v, done);
+    }
+  }
+
+  /** Whose reach to ring on the board: the selection, or whatever is being looked at. Whatever has no weapon gets no circle. */
+  showReach(ref: Ref | null): void {
+    this.reachRef = ref;
+    this.syncReach();
+  }
+
+  /** Draws the reach circle as things stand: the weapon's range for a radius, in the colour of the side it is on. */
+  private syncReach(): void {
+    const s = this.state;
+    const ref = this.reachRef;
+    let range = 0;
+    let own = false;
+    if (s && ref) {
+      if (ref.kind === 'unit') {
+        const hit = unitById(s, ref.id);
+        if (hit) {
+          range = statsOf(s, hit.unit).range;
+          own = hit.owner.id === s.currentPlayer && s.phase === 'player';
+        }
+      } else if (ref.kind === 'building') {
+        const hit = buildingById(s, ref.id);
+        if (hit) {
+          range = BUILDINGS[hit.building.key].levels[hit.building.level - 1].range;
+          own = hit.owner.id === s.currentPlayer && s.phase === 'player';
+        }
+      } else if (ref.kind === 'alien') range = ALIENS[alienById(s, ref.id)?.key ?? 'chloe'].range;
+      else range = SPIDERLING.range;
+    }
+    // A weapon reaches every tile whose centre is within its range, counted tile by tile. So the circle
+    // runs just outside the farthest of those tiles along the four sides of it.
+    this.reach.set(range > 0 ? range + 0.5 : null, own ? OWN_REACH : FOE_REACH);
   }
 
   private ratioOf(r: Ref): number {
@@ -957,6 +1134,18 @@ export class GameView {
       ring.position.set(sel.root.position.x, 0.05, sel.root.position.z);
       const size = sel.kind === 'building' ? 1.5 : sel.kind === 'alien' ? 1.25 : sel.hover > 0 ? 0.8 : 0.62 + Math.sin(this.clock * 5) * 0.06;
       ring.scale.setScalar(size);
+    }
+    // The reach circle keeps to the heels of whatever it belongs to, a unit on the move included.
+    const reach = this.reachRef ? this.views.get(keyOf(this.reachRef)) : null;
+    if (reach) this.reach.group.position.set(reach.root.position.x, REACH_Y, reach.root.position.z);
+    this.reach.tick(this.clock);
+
+    // Once a move or a shot has played out, whatever finished with it turns to stone.
+    const still = !this.busy;
+    if (!still) this.wasStill = false;
+    else if (!this.wasStill) {
+      this.wasStill = true;
+      if (this.state) this.syncSpent(this.state);
     }
 
     const idle = this.settled;

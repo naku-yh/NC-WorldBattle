@@ -267,7 +267,7 @@ describe('地形加成', () => {
     const missile = spawn(s, 0, 'missileTank', 9, 9);
     const near = spawn(s, 0, 'tank', 8, 8);
     setTerrain(s, 8, 8, 'forest');
-    expect(statsOf(s, missile)).toMatchObject({ attack: 10, range: 3, defense: 2 });
+    expect(statsOf(s, missile)).toMatchObject({ attack: 15, range: 3, defense: 2 });
     // A weapon always reaches the next tile over, however deep the wood.
     expect(statsOf(s, near).range).toBe(1);
     const far = spawn(s, 1, 'infantry', 9, 13); // 4 tiles away: too far from inside the wood

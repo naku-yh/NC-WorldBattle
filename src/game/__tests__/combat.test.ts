@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { attackTargets, moveRange, netDefense, netDamage } from '../engine';
+import { UNITS } from '../data';
+import { attackPower, attackTargets, canStillAct, moveRange, netDefense, netDamage, volley } from '../engine';
 import { BoardIndex, cheb, inBoard, key } from '../board';
 import { apply, build, dropAlien, newGame, nextTurn, pathOf, placeBuilding, rich, spawn, toTurn, tryApply } from './helpers';
 import type { EntityRef, GameState, Unit } from '../types';
@@ -26,7 +27,7 @@ describe('伤害公式', () => {
     const laser = spawn(s, 0, 'laserTank', 9, 9);
     const beast = spawn(s, 1, 'apocalypse', 9, 10);
     atk(s, laser, unit(beast.id));
-    expect(beast.hp).toBe(40 - (7 + 2)); // a tank in the open, armour notwithstanding
+    expect(beast.hp).toBe(40 - (10 + 2)); // a tank in the open, armour notwithstanding
   });
 
   it('多管武器每发单独计算', () => {
@@ -35,8 +36,8 @@ describe('伤害公式', () => {
     const twin = spawn(s, 0, 'twinTank', 9, 9);
     const tank = spawn(s, 1, 'tank', 9, 10);
     atk(s, twin, unit(tank.id));
-    // Two shells of (5 + 2) against (3 − 2) armour: tanks in the open hit harder and are thinner.
-    expect(tank.hp).toBe(16 - 2 * 6);
+    // Two shells of (7 + 2) against (3 − 2) armour: tanks in the open hit harder and are thinner.
+    expect(tank.hp).toBe(15 - 2 * 8);
   });
 });
 
@@ -48,9 +49,9 @@ describe('单位对战', () => {
     const at = spawn(s, 0, 'atSoldier', 9, 8);
     const tank = spawn(s, 1, 'tank', 9, 9);
     atk(s, inf, unit(tank.id));
-    expect(tank.hp).toBe(16 - 2); // 3 − (3 − 2)
+    expect(tank.hp).toBe(15 - 2); // 3 − (3 − 2)
     atk(s, at, unit(tank.id));
-    expect(tank.hp).toBe(16 - 2 - 6);
+    expect(tank.hp).toBe(15 - 2 - 6);
     expect(tryApply(s, { type: 'ATTACK', source: unit(at.id), target: unit(tank.id) })).toContain('已经攻击');
   });
 
@@ -87,6 +88,25 @@ describe('单位对战', () => {
   });
 });
 
+  it('走完又打过的单位本回合不再有指令可下；只做了一样的还能做另一样', () => {
+    const s = newGame();
+    toTurn(s);
+    const tank = spawn(s, 0, 'tank', 9, 9);
+    const truck = spawn(s, 0, 'truck', 13, 13);
+    expect(canStillAct(tank)).toBe(true);
+    apply(s, { type: 'MOVE', unitId: tank.id, x: 9, y: 13 });
+    expect(canStillAct(tank)).toBe(true); // it can still shoot
+    atk(s, tank, unit(spawn(s, 1, 'infantry', 9, 15).id));
+    expect(canStillAct(tank)).toBe(false);
+    // Something with no weapon is spent once it has moved.
+    truck.moveUsed = true;
+    expect(canStillAct(truck)).toBe(false);
+    // A shot without a move leaves the move.
+    const gunner = spawn(s, 0, 'tank', 9, 9);
+    atk(s, gunner, unit(spawn(s, 1, 'infantry', 9, 11).id));
+    expect(canStillAct(gunner)).toBe(true);
+  });
+
 describe('空中单位', () => {
   it('普通单位打不到战斗机；防空坦克和防空炮可以；防空炮只打空中目标', () => {
     const s = newGame();
@@ -103,7 +123,8 @@ describe('空中单位', () => {
 
     expect(attackTargets(s, unit(aaTank.id)).map((t) => t.id).sort()).toEqual([jetA.id, jetB.id, foot.id].sort());
     atk(s, aaTank, unit(jetA.id));
-    expect(jetA.hp).toBe(12 - ((7 + 2) - 2));
+    // Twice its attack of 5 against aircraft, and the open ground's 2 on top: (10 + 2) − 2.
+    expect(jetA.hp).toBe(12 - ((10 + 2) - 2));
 
     const fromGun = attackTargets(s, building(aaGun.id)).map((t) => t.id);
     expect(fromGun).toContain(jetB.id);
@@ -114,6 +135,33 @@ describe('空中单位', () => {
 
     aaGun.powered = false;
     expect(attackTargets(s, building(aaGun.id))).toEqual([]);
+  });
+
+  it('防空坦克对空攻击翻倍；天启双塔坦克每回合两炮合计 18，对空合计 8', () => {
+    const s = newGame();
+    toTurn(s);
+    const aaTank = spawn(s, 0, 'aaTank', 8, 9);
+    const beast = spawn(s, 0, 'apocalypse', 9, 9);
+    const foot = spawn(s, 1, 'infantry', 8, 10);
+    const jet = spawn(s, 1, 'fighter', 9, 10);
+
+    // Against the ground the anti-air tank is no stronger than its attack of 5.
+    atk(s, aaTank, unit(foot.id));
+    expect(foot.hp).toBe(6 - (5 + 2));
+
+    // The Apocalypse reaches aircraft too: two shells of 4, so 8 for the turn, against armour of 2.
+    atk(s, beast, unit(jet.id));
+    expect(jet.hp).toBe(12 - 2 * ((4 + 2) - 2));
+  });
+
+  it('卡片上的攻击是每回合每一炮的合计', () => {
+    expect(volley(UNITS.tank)).toBe(8);
+    expect(volley(UNITS.twinTank)).toBe(14);
+    expect(volley(UNITS.apocalypse)).toBe(18);
+    const s = newGame();
+    toTurn(s);
+    for (const k of ['tank', 'twinTank', 'aaTank', 'missileTank', 'laserTank', 'apocalypse'] as const) spawn(s, 0, k, 9, 9);
+    expect(attackPower(s.players[0])).toBe(8 + 14 + 5 + 15 + 10 + 18);
   });
 
   it('战斗机可以攻击地面单位和建筑', () => {
@@ -234,7 +282,7 @@ describe('基地防御', () => {
     const events = atk(s, missile, building(plant.id));
     expect(foe.buildings.some((b) => b.key === 'powerPlant')).toBe(false);
     expect(turret.powered).toBe(false);
-    expect(missile.hp).toBe(14);
+    expect(missile.hp).toBe(15);
     expect(events.filter((e) => e.type === 'attack')).toHaveLength(1);
   });
 
@@ -355,10 +403,10 @@ describe('外星人克洛伊', () => {
     atk(s, spawn(s, 0, 'sniper', 8, 8), beast);
     expect(chloe.hp).toBe(90 - 7);
 
-    // Player 1: laser tank 9 + tank 6 = 15 (both in the open), then the finishing tank shot.
+    // Player 1: apocalypse 14 (two shells of 9 + 2 against armour of 4) + sniper 1 = 15, then the finishing tank shot.
     toTurn(s, 1);
-    atk(s, spawn(s, 1, 'laserTank', 10, 10), beast);
-    atk(s, spawn(s, 1, 'tank', 10, 9), beast);
+    atk(s, spawn(s, 1, 'apocalypse', 10, 10), beast);
+    atk(s, spawn(s, 1, 'sniper', 10, 9), beast);
     expect(chloe.hp).toBe(90 - 22);
     chloe.hp = 1;
     const ore0 = p0.resources.ore;

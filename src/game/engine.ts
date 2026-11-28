@@ -209,14 +209,19 @@ export function netDefense(p: PlayerState): number {
 /** Total attack power: every living combat unit plus powered defence structures. */
 export function attackPower(p: PlayerState): number {
   let n = 0;
-  for (const u of p.units) n += UNITS[u.key].attack * UNITS[u.key].shots;
+  for (const u of p.units) n += volley(UNITS[u.key]);
   for (const b of p.buildings) {
     if (!b.powered) continue;
-    const lv = BUILDINGS[b.key].levels[b.level - 1];
-    n += lv.attack * lv.shots;
+    n += volley(BUILDINGS[b.key].levels[b.level - 1]);
   }
   return n;
 }
+
+/** What one full attack with these stats comes to, every shot counted: the figure the cards give as a unit's attack. */
+export const volley = (st: Pick<CombatStats, 'attack' | 'shots'>): number => st.attack * st.shots;
+
+/** The attack `st` brings to bear on a target of class `cls`: what it keeps for aircraft, if anything, and otherwise its attack. */
+export const attackOn = (st: Pick<CombatStats, 'attack' | 'airAttack'>, cls: TargetClass): number => (cls === 'air' && st.airAttack !== undefined ? st.airAttack : st.attack);
 
 export function countBuilding(p: PlayerState, k: BuildingKey): number {
   return p.buildings.filter((b) => b.key === k).length;
@@ -463,6 +468,11 @@ export function unitById(s: GameState, id: number): { unit: Unit; owner: PlayerS
   return null;
 }
 
+/** Whether a unit still has an order it may take this turn: a move, or a shot it has not fired. */
+export function canStillAct(u: Unit): boolean {
+  return !u.moveUsed || (UNITS[u.key].attack > 0 && !u.attackUsed);
+}
+
 /** A unit's armour plus whatever the ground beneath it adds. Never negative. */
 export function defenseOf(s: GameState, u: Unit): number {
   const d = UNITS[u.key];
@@ -471,17 +481,20 @@ export function defenseOf(s: GameState, u: Unit): number {
 
 /** A unit type's stats straight off the reference card. */
 export function baseStats(k: UnitKey): CombatStats {
-  const d = UNITS[k];
-  return { attack: d.attack, shots: d.shots, defense: d.defense, range: d.range, canHit: d.canHit, pierce: d.pierce };
+  const { attack, shots, defense, range, canHit, pierce, airAttack } = UNITS[k];
+  return { attack, shots, defense, range, canHit, pierce, ...(airAttack === undefined ? {} : { airAttack }) };
 }
 
 /** A unit's stats as it stands: its own, adjusted by the terrain it is on. */
 export function statsOf(s: GameState, u: Unit): CombatStats {
   const d = UNITS[u.key];
   const e = terrainEffect(s, d.family, u.x, u.y);
+  const by = e.attack ?? 0;
   return {
-    attack: Math.max(0, d.attack + (e.attack ?? 0)),
+    attack: Math.max(0, d.attack + by),
     shots: d.shots,
+    // The ground counts for as much against aircraft as against anything else.
+    ...(d.airAttack === undefined ? {} : { airAttack: Math.max(0, d.airAttack + by) }),
     defense: defenseOf(s, u),
     // A weapon always reaches the next tile over, whatever woods it is sitting in.
     range: d.range > 0 ? Math.max(1, d.range + (e.range ?? 0)) : 0,
@@ -636,8 +649,10 @@ export function netDamage(attack: number, defense: number, pierce = false): numb
 }
 
 function strike(s: GameState, attacker: number, t: Target, st: CombatStats, events: GameEvent[]): void {
+  // Each shell is worked out on its own, so armour tells twice against a weapon that fires twice.
+  const attack = attackOn(st, t.cls);
   let dmg = 0;
-  for (let i = 0; i < st.shots; i++) dmg += netDamage(st.attack, t.defense, st.pierce);
+  for (let i = 0; i < st.shots; i++) dmg += netDamage(attack, t.defense, st.pierce);
   t.obj.hp -= dmg;
   events.push({ type: 'damage', target: t.ref, amount: dmg, pos: t.pos });
   if (attacker >= 0) {

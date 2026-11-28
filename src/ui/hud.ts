@@ -1,10 +1,10 @@
 import { ALIENS, BUILDABLE, BUILDINGS, HARVEST_YIELD, PRODUCED_UNITS, RESOURCES, SCORE_LAST_HIT, SCORE_SPIDER, SPIDERLING, TERRAIN, TRUCKS_PER_FACTORY, UNITS } from '../game/data';
-import { alienById, attackPower, buildingById, canBuild, canProduce, canUpgrade, countBuilding, hqOf, netDefense, nextLevelOf, spiderById, statsOf, unitById } from '../game/engine';
+import { alienById, attackPower, buildingById, canBuild, canProduce, canStillAct, canUpgrade, countBuilding, hqOf, netDefense, nextLevelOf, spiderById, statsOf, unitById, volley } from '../game/engine';
 import { terrainAt, zoneSize } from '../game/board';
-import type { BuildingKey, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Resources, TerrainDef, TerrainEffect, UnitFamily, UnitKey } from '../game/types';
+import type { BuildingKey, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Resources, TerrainDef, TerrainEffect, Unit, UnitFamily, UnitKey } from '../game/types';
 import { fmt, h, touchOnly } from './dom';
 import { alienIcon, buildingIcon, glyph, icon, iconBox, spiderIcon, terrainIcon, unitIcon, type IconName } from './icons';
-import { costText, effectOf } from './rules';
+import { attackNotes, costText, effectOf } from './rules';
 
 /** The sidebar's pages. Gathering and the rulebook have left it: gathering has a panel of its own, the rules live in the pause menu. */
 export type Tab = 'build' | 'produce' | 'structures';
@@ -76,7 +76,7 @@ function stat(label: string, text: string): HTMLElement {
 const signed = (n: number): string => (n > 0 ? `+${n}` : `−${Math.abs(n)}`);
 
 /** How many cells each figure's row has: the most it reaches on any unit or alien, so that every row of a kind is as long as every other and two cards line up. */
-const ROOM = { health: 12, attack: 16, defense: 10, range: 6 };
+const ROOM = { health: 12, attack: 18, defense: 10, range: 6, move: 8 };
 
 /** One figure of a card: a row of cells, then the number. */
 interface Meter {
@@ -109,6 +109,11 @@ function health(hp: number, max: number): Meter {
   return { label: '生命', base: max, value: hp, room: ROOM.health, text: `${hp}/${max}`, share: true };
 }
 
+/** A figure of a unit's card on the "生产" page, where nothing has happened to the unit yet: its cells, then the figure in square brackets. */
+function cardMeter(label: string, value: number, room: number, share = false): Meter {
+  return { label, base: value, value, room, text: `[${value}]`, ...(share ? { share: true } : {}) };
+}
+
 /** A figure as it is drawn: its cells, then its number. */
 function meterEl(m: Meter): HTMLElement {
   const cells = h('span', { class: 'cells' });
@@ -130,23 +135,13 @@ function metersEl(rows: Meter[][]): HTMLElement {
   return h('div', { class: single ? 'meters one' : 'meters' }, ...rows.flat().map(meterEl));
 }
 
-function unitStats(uk: UnitKey): HTMLElement[] {
-  const d = UNITS[uk];
-  return [
-    stat('攻', `${d.attack}${d.shots > 1 ? `×${d.shots}` : ''}`),
-    stat('防', String(d.defense)),
-    stat('血', String(d.hp)),
-    stat('射程', String(d.range)),
-    stat('移动', String(d.move)),
-  ];
-}
-
+/** What the name of a unit does not say: how its attack comes, and what else it can do. */
 function unitTags(uk: UnitKey): HTMLElement[] {
   const d = UNITS[uk];
-  const out: HTMLElement[] = [];
+  const out: HTMLElement[] = attackNotes(d).map((note) => h('span', { class: 'tag' }, note));
   if (d.pierce) out.push(h('span', { class: 'tag' }, '破甲'));
   if (d.unitClass === 'air') out.push(h('span', { class: 'tag' }, '空中单位'));
-  else if (d.canHit.includes('air')) out.push(h('span', { class: 'tag' }, '可对空'));
+  else if (d.canHit.includes('air') && d.airAttack === undefined) out.push(h('span', { class: 'tag' }, '可对空'));
   return out;
 }
 
@@ -249,7 +244,7 @@ function describeBeast(s: GameState, ref: EntityRef): Described | null {
     art: alienIcon(a.key),
     tags: [h('span', { class: 'tag warn' }, `第 ${a.arrived} 回合降临`)],
     meters: [
-      [health(a.hp, d.hp), points('攻击', d.attack, d.attack, ROOM.attack, d.shots > 1 ? `×${d.shots}` : '')],
+      [health(a.hp, d.hp), points('攻击', volley(d), volley(d), ROOM.attack)],
       [points('防御', d.defense, d.defense, ROOM.defense), points('射程', d.range, d.range, ROOM.range)],
     ],
     stats: [stat('移动', d.teleports ? '瞬移' : String(d.move))],
@@ -258,7 +253,18 @@ function describeBeast(s: GameState, ref: EntityRef): Described | null {
   };
 }
 
-function describe(s: GameState, ref: EntityRef, mine: boolean): Described | null {
+/** What a unit of the player's may still be ordered to do this turn: the line of help under its card. It names only what is on the board to be clicked. */
+function ordersLeft(u: Unit): string {
+  const move = !u.moveUsed;
+  const shoot = !u.attackUsed;
+  if (move && shoot) return '点击蓝色格子移动，点击红色目标攻击。';
+  if (move) return '本回合已经攻击过，还能移动一次：点击蓝色格子。';
+  if (shoot) return '本回合已经移动过，不能再移动；还能攻击一次：点击射程内的红色目标。';
+  // Out of orders for this turn: the grey one, tapped only to look at it. Its flags clear when its owner's next turn begins.
+  return '本回合已经移动并攻击过，不能再行动，下个回合恢复。';
+}
+
+function describe(s: GameState, ref: EntityRef, mine: boolean, humanTurn = false): Described | null {
   if (ref.kind === 'alien' || ref.kind === 'spider') return describeBeast(s, ref);
   if (ref.kind === 'unit') {
     const hit = unitById(s, ref.id);
@@ -267,7 +273,9 @@ function describe(s: GameState, ref: EntityRef, mine: boolean): Described | null
     const st = statsOf(s, hit.unit);
     const ground = TERRAIN[terrainAt(s, hit.unit.x, hit.unit.y)];
     const tags: HTMLElement[] = [];
-    if (mine) {
+    // One of the player's own units that has nothing left this turn is never selected, only looked at: the grey one says so itself.
+    const spent = humanTurn && !mine && d.attack > 0 && hit.owner.id === s.currentPlayer && !canStillAct(hit.unit);
+    if (mine || spent) {
       tags.push(h('span', { class: hit.unit.moveUsed ? 'tag' : 'tag good' }, hit.unit.moveUsed ? '已移动' : '可移动'));
       tags.push(h('span', { class: hit.unit.attackUsed ? 'tag' : 'tag good' }, hit.unit.attackUsed ? '已攻击' : '可攻击'));
     }
@@ -277,16 +285,18 @@ function describe(s: GameState, ref: EntityRef, mine: boolean): Described | null
       art: unitIcon(hit.unit.key),
       // What it can still do this turn comes first; what it is comes after.
       tags: [...tags, ...unitTags(hit.unit.key)],
+      // The attack is what the unit puts out in a turn, every shell of it; what the ground adds is added to each shell.
       meters:
         d.attack > 0
           ? [
-              [health(hit.unit.hp, d.hp), points('攻击', d.attack, st.attack, ROOM.attack, d.shots > 1 ? `×${d.shots}` : '')],
+              [health(hit.unit.hp, d.hp), points('攻击', volley(d), volley(st), ROOM.attack)],
               [points('防御', d.defense, st.defense, ROOM.defense), points('射程', d.range, st.range, ROOM.range)],
             ]
           : undefined,
       stats: d.attack > 0 ? [] : [stat('作用', '每台每次采集 100 资源')],
       terrain: h('span', { class: 'terrain', title: ground.rule }, `地形 ${groundText(ground, d.family)}`),
-      help: mine ? '点击蓝色格子移动，点击红色目标攻击。' : '',
+      // The help names only what is on the board to be clicked: a unit that has already moved has no blue tiles.
+      help: (mine || spent) && d.attack > 0 ? ordersLeft(hit.unit) : '',
     };
   }
   const hit = buildingById(s, ref.id);
@@ -512,6 +522,49 @@ export class Hud {
     return h('div', { class: 'row' }, iconBox(art), body, ...tail);
   }
 
+  /**
+   * One unit on the "生产" page, as a card: its picture and its name over what it
+   * costs, its figures counted in cells two to a row, and the way to order one in
+   * the last corner. `count` is how many are already had, against the most there can be.
+   */
+  private unitCard(s: GameState, p: PlayerState, uk: UnitKey, count: string, mine: boolean): HTMLElement {
+    const d = UNITS[uk];
+    const err = canProduce(s, p, uk);
+    const btn = h('button', { class: 'btn small', disabled: !mine || !!err, title: err ?? '' }, '生产');
+    btn.onclick = () => this.a.produce(uk);
+    const armed = d.attack > 0;
+    return h(
+      'div',
+      { class: 'ucard' },
+      h(
+        'div',
+        { class: 'ucard-top' },
+        iconBox(unitIcon(uk)),
+        h(
+          'div',
+          { class: 'ucard-id' },
+          h('div', { class: 'name', title: d.desc }, d.name, ...unitTags(uk)),
+          // What it costs sits in a lozenge of its own, apart from the figures; how many are had goes beside it.
+          h('div', { class: 'ucard-cost' }, costChips(d.cost, p.resources), count ? h('small', {}, count) : null),
+        ),
+      ),
+      h(
+        'div',
+        { class: 'meters' },
+        ...(armed
+          ? [
+              cardMeter('生命', d.hp, ROOM.health, true),
+              cardMeter('攻击', volley(d), ROOM.attack),
+              cardMeter('防御', d.defense, ROOM.defense),
+              cardMeter('射程', d.range, ROOM.range),
+              cardMeter('移动', d.move, ROOM.move),
+            ].map(meterEl)
+          : [h('span', { class: 'ucard-note' }, '每台每次采集运回 100 资源')]),
+        btn,
+      ),
+    );
+  }
+
   private panel(s: GameState, p: PlayerState, ctx: HudCtx): HTMLElement {
     const mine = ctx.humanTurn;
     switch (ctx.tab) {
@@ -575,26 +628,8 @@ export class Hud {
           const focus = ctx.focusProducer === bk;
           box.append(h('div', { class: focus ? `group focus${ctx.scrollProducer ? ' flash' : ''}` : 'group' }, iconBox(buildingIcon(bk, 1)), d.levels[0].name, h('small', {}, status)));
           for (const uk of PRODUCED_UNITS[bk]) {
-            const ud = UNITS[uk];
-            const err = canProduce(s, p, uk);
-            let count = '';
-            if (uk === 'truck') count = `已有 ${p.trucks}/${TRUCKS_PER_FACTORY * Math.max(1, total)}`;
-            else if (d.capPerBuilding) count = `已有 ${p.units.filter((u) => u.key === uk).length}/${d.capPerBuilding * on}`;
-            const btn = h('button', { class: 'btn small', disabled: !mine || !!err, title: err ?? '' }, '生产');
-            btn.onclick = () => this.a.produce(uk);
-            box.append(
-              this.row(
-                unitIcon(uk),
-                h(
-                  'div',
-                  { class: 'info' },
-                  h('div', { class: 'name', title: ud.desc }, ud.name, ...unitTags(uk)),
-                  h('div', { class: 'sub' }, ...(uk === 'truck' ? [h('span', {}, '每台每次采集运回 100 资源')] : unitStats(uk))),
-                  h('div', { class: 'sub' }, costChips(ud.cost, p.resources), count ? h('span', {}, count) : null),
-                ),
-                btn,
-              ),
-            );
+            const count = uk === 'truck' ? `已有 ${p.trucks}/${TRUCKS_PER_FACTORY * Math.max(1, total)}` : d.capPerBuilding ? `已有 ${p.units.filter((u) => u.key === uk).length}/${d.capPerBuilding * on}` : '';
+            box.append(this.unitCard(s, p, uk, count, mine));
           }
         }
         return box;
@@ -657,7 +692,7 @@ export class Hud {
     const el = this.cardEl;
     el.replaceChildren();
     const ref = ctx.selection ?? ctx.inspect;
-    const info = ref ? describe(s, ref, ctx.selection !== null && ctx.humanTurn) : ctx.tile ? describeTile(s, ctx.tile) : null;
+    const info = ref ? describe(s, ref, ctx.selection !== null && ctx.humanTurn, ctx.humanTurn) : ctx.tile ? describeTile(s, ctx.tile) : null;
     if (!info) return;
     const mine = ctx.selection !== null && ctx.humanTurn;
     const body = h(

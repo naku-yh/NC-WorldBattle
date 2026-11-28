@@ -55,8 +55,11 @@ export interface TerrainDef {
 export type Waterway = 'vertical' | 'horizontal';
 
 export interface CombatStats {
+  /** Attack against anything but aircraft, per shot. */
   attack: number;
   shots: number;
+  /** Attack against aircraft instead of `attack`, per shot. Left out by weapons that have nothing special for them. */
+  airAttack?: number;
   defense: number;
   range: number;
   canHit: TargetClass[];

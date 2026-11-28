@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { aiDecide } from '../game/ai';
 import { toWorld } from '../game/board';
-import { BOARD_SIZE, BUILDINGS, PLAYER_COLORS, PLAYER_NAMES, UNITS } from '../game/data';
-import { attackTargets, buildSpots, buildingById, canBuild, createGame, moveRange, placementError, unitById } from '../game/engine';
+import { BOARD_SIZE, BUILDINGS, PLAYER_COLORS, PLAYER_NAMES } from '../game/data';
+import { attackTargets, buildSpots, buildingById, canBuild, canStillAct, createGame, moveRange, placementError, unitById } from '../game/engine';
 import type { Action, BuildingKey, EntityRef, GameConfig, GameEvent, GameState, PlayerState, Pt } from '../game/types';
 import { HIGHLIGHT, VIEW_DIR, Scene, worldOf } from '../render/scene';
 import type { GameView } from '../render/view';
@@ -605,10 +605,7 @@ export class Controller {
   private commandable(kind: 'unit' | 'building', id: number, p: PlayerState): boolean {
     const s = this.state!;
     if (!this.own(kind, id, p)) return false;
-    if (kind === 'unit') {
-      const u = unitById(s, id)!.unit;
-      return !u.moveUsed || (!u.attackUsed && UNITS[u.key].attack > 0);
-    }
+    if (kind === 'unit') return canStillAct(unitById(s, id)!.unit);
     const b = buildingById(s, id)!.building;
     const lv = BUILDINGS[b.key].levels[b.level - 1];
     return lv.attack > 0 && b.powered && !b.fired;
@@ -797,7 +794,7 @@ export class Controller {
     if (!s || !this.humanTurn()) return;
     const p = s.players[s.currentPlayer];
     const pool: Sel[] = [
-      ...p.units.filter((u) => !u.moveUsed || (!u.attackUsed && UNITS[u.key].attack > 0)).map((u) => ({ kind: 'unit' as const, id: u.id })),
+      ...p.units.filter(canStillAct).map((u) => ({ kind: 'unit' as const, id: u.id })),
       ...p.buildings
         .filter((b) => {
           const lv = BUILDINGS[b.key].levels[b.level - 1];
@@ -846,6 +843,8 @@ export class Controller {
       speed: this.speed,
     });
     this.scrollToProducer = false;
+    // What is ringed on the board is what the card at the bottom is about: the selection first, and otherwise whatever is being looked at.
+    this.view.showReach(this.sel ?? this.inspect);
     // The gathering panel covers a strip of the picture when it is up: slide the board clear of it.
     this.scene.setSideInset(harvesting ? HARVEST_INSET : 0);
     this.minimap.update(this.store.state);

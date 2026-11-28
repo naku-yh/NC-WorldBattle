@@ -1,5 +1,6 @@
 import { ALIENS, ALIEN_CAP, ALIEN_EVERY, ALIEN_KEYS, BUILDABLE, BUILDINGS, MAP_SIZES, MIN_TURNS, RESOURCES, SCORE_BUILDING, SCORE_LAST_HIT, SPIDERLING, TERRAIN, UNITS } from '../game/data';
-import type { AlienKey, BuildingDef, Cost, ResourceKey, Terrain, UnitKey } from '../game/types';
+import { volley } from '../game/engine';
+import type { AlienKey, BuildingDef, Cost, ResourceKey, Terrain, UnitDef, UnitKey } from '../game/types';
 import { h, touchOnly } from './dom';
 import { alienIcon, buildingIcon, icon, iconBox, spiderIcon, terrainIcon, unitIcon } from './icons';
 
@@ -9,6 +10,28 @@ export const costText = (c: Cost): string => RES_KEYS.filter((k) => c[k]).map((k
 
 /** Every rung above the first with its price: "重型炮台（500 矿 300 油）", or the whole ladder for the net. */
 const upgradeText = (d: BuildingDef): string => d.levels.slice(1).map((l) => `${l.name}（${costText(l.cost)}）`).join(' → ') || '—';
+
+/** What the attack figure leaves out on its own: how many shells a turn's attack comes in, and what the weapon has for aircraft. */
+export function attackNotes(d: Pick<UnitDef, 'attack' | 'shots' | 'airAttack'>): string[] {
+  const out: string[] = [];
+  if (d.shots > 1) out.push(d.shots === 2 ? '两炮' : `${d.shots} 炮`);
+  if (d.airAttack !== undefined) out.push(d.airAttack === d.attack * 2 ? '对空×2' : `对空 ${volley({ attack: d.airAttack, shots: d.shots })}`);
+  return out;
+}
+
+/** The attack figure as the cards give it, every shell of the turn counted, with what it leaves out: "18（两炮 · 对空 8）". */
+export function attackText(d: Pick<UnitDef, 'attack' | 'shots' | 'airAttack'>): string {
+  const notes = attackNotes(d);
+  return `${volley(d)}${notes.length ? `（${notes.join(' · ')}）` : ''}`;
+}
+
+/** Everything on the ground that can bring an aircraft down, the anti-air gun aside. */
+const AIR_DEFENCE = Object.values(UNITS)
+  .filter((d) => d.unitClass === 'ground' && d.canHit.includes('air'))
+  .map((d) => d.name)
+  .join('、');
+/** The units whose attack figure needs a word beside it. */
+const VOLLEY_TEXT = [UNITS.twinTank, UNITS.aaTank, UNITS.apocalypse].map((d) => `${d.name} ${attackText(d)}`).join('；');
 
 /** The defense net's ladder: what each rung absorbs, "2 / 3 / 4 / 6 / 8". */
 const NET = BUILDINGS.defenseNet.levels;
@@ -46,7 +69,7 @@ const every = ALIEN_EVERY.join('–');
 const alienStats = (k: AlienKey): string => {
   const d = ALIENS[k];
   const travel = d.teleports ? '移动 瞬移' : `射程 ${d.range} · 移动 ${d.move}`;
-  return `生命 ${d.hp} · 攻击 ${d.attack} · 防御 ${d.defense} · ${travel}`;
+  return `生命 ${d.hp} · 攻击 ${volley(d)} · 防御 ${d.defense} · ${travel}`;
 };
 
 /** What the winner is decided on, said the same way in both rulebooks. */
@@ -76,7 +99,7 @@ function rulesHtml(): string {
   const units = (Object.keys(UNITS) as UnitKey[])
     .map((k) => {
       const d = UNITS[k];
-      return `<tr><td>${d.name}</td><td>${costText(d.cost)}</td><td>${d.attack}${d.shots > 1 ? `×${d.shots}` : ''}</td><td>${d.defense}</td><td>${d.hp}</td><td>${d.range}</td><td>${d.move || '—'}</td></tr>`;
+      return `<tr><td>${d.name}</td><td>${costText(d.cost)}</td><td>${attackText(d)}</td><td>${d.defense}</td><td>${d.hp}</td><td>${d.range}</td><td>${d.move || '—'}</td></tr>`;
     })
     .join('');
   const ground = (Object.keys(TERRAIN) as (keyof typeof TERRAIN)[]).map((k) => `<tr><td>${TERRAIN[k].name}</td><td>${TERRAIN[k].rule}</td></tr>`).join('');
@@ -103,7 +126,8 @@ ${GOAL_HTML}
 <ul>
   <li>伤害 = 攻击力 − 防御值（最低 0）。<b>破甲</b>武器无视防御值。</li>
   <li><b>防御网</b>${NET_RULE}</li>
-  <li>只有防空武器（防空坦克、防空炮）能击落战斗机；防空炮只打空中目标。</li>
+  <li>只有防空武器（${AIR_DEFENCE}、防空炮）能击落战斗机；防空炮只打空中目标。</li>
+  <li>攻击力是每回合每一炮的合计：${VOLLEY_TEXT}。</li>
   <li>敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。</li>
 </ul>
 ${ALIENS_HTML}
@@ -142,7 +166,7 @@ export function rulesPanel(): HTMLElement {
       'div',
       { class: 'rule-row' },
       iconBox(unitIcon(k)),
-      h('div', { class: 'info' }, h('div', { class: 'name' }, d.name, d.shots > 1 ? h('span', { class: 'tag' }, `×${d.shots}`) : null), h('div', { class: 'sub' }, `${costText(d.cost)}${d.attack ? ` · 攻 ${d.attack}${d.shots > 1 ? `×${d.shots}` : ''} 防 ${d.defense} 血 ${d.hp} 射程 ${d.range}` : ''}${made ? ` · ${made}` : ''}`)),
+      h('div', { class: 'info' }, h('div', { class: 'name' }, d.name, ...attackNotes(d).map((n) => h('span', { class: 'tag' }, n))), h('div', { class: 'sub' }, `${costText(d.cost)}${d.attack ? ` · 攻 ${attackText(d)} 防 ${d.defense} 血 ${d.hp} 射程 ${d.range}` : ''}${made ? ` · ${made}` : ''}`)),
     );
   });
   const groundRows = (Object.keys(TERRAIN) as Terrain[]).map((k) =>
@@ -200,7 +224,7 @@ export function rulesPanel(): HTMLElement {
     section(
       '战斗',
       false,
-      h('ul', {}, li('伤害 = 攻击力 − 防御值（最低 0）；', b('破甲'), '武器无视防御值。'), li(b('防御网'), NET_RULE), li('只有防空武器（防空坦克、防空炮）能击落战斗机。'), li('敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。')),
+      h('ul', {}, li('伤害 = 攻击力 − 防御值（最低 0）；', b('破甲'), '武器无视防御值。'), li(b('防御网'), NET_RULE), li(`只有防空武器（${AIR_DEFENCE}、防空炮）能击落战斗机。`), li('攻击力是每回合每一炮的合计：', VOLLEY_TEXT, '。'), li('敌人攻击基地建筑时，每座通电的炮台 / 防空炮会各反击一次。')),
     ),
     section(
       '外星人',

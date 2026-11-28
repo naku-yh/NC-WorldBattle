@@ -577,6 +577,113 @@ button {
   border-radius: 6px;
 }
 
+/* ---------- unit cards on the "生产" page ---------- */
+/* One card for each unit: its picture and name over what it costs in a lozenge, then its figures
+   counted in cells two to a row, with the way to order one in the last corner. */
+.ucard {
+  padding: 10px 12px 12px;
+  margin-bottom: 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ucard-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.ucard-id {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ucard-id .name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.ucard-cost {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.ucard-cost .cost {
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.ucard-cost .cost svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ucard-cost small {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* The figures, two to a row. The cells are small enough that all eighteen of the Apocalypse's attack sit side by side. */
+.ucard .meters {
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.14fr);
+  gap: 7px 12px;
+  align-items: center;
+}
+
+.ucard .meter {
+  grid-template-columns: 2em auto minmax(2.8em, auto);
+  gap: 5px;
+  font-size: 12px;
+}
+
+.ucard .cells {
+  gap: 1px;
+}
+
+.ucard .cells i {
+  width: 4px;
+  height: 12px;
+  border-radius: 1px;
+}
+
+/* The one thing to press on a card: a plate that stands out from the card the way a solid bar does on paper. */
+.ucard .btn {
+  min-height: 30px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.24);
+  font-weight: 700;
+}
+
+.ucard .btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.ucard-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .harvest {
   display: flex;
   flex-direction: column;
@@ -1589,7 +1696,8 @@ summary {
 .row .icon,
 .placing .icon,
 .card .icon,
-.rule-row .icon {
+.rule-row .icon,
+.ucard .icon {
   width: 40px;
   height: 40px;
   flex: none;
@@ -1603,7 +1711,8 @@ summary {
 .row .icon svg,
 .placing .icon svg,
 .card .icon svg,
-.rule-row .icon svg {
+.rule-row .icon svg,
+.ucard .icon svg {
   width: 30px;
   height: 30px;
   display: block;

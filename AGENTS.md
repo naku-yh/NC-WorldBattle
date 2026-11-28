@@ -29,7 +29,7 @@
   - `__tests__/` — 规则测试（`helpers.ts` 提供 newGame / apply / toTurn / rich / spawn / build / playGame）
 - `src/render/` — three.js 画面，import game/，不 import ui/
   - `scene.ts` — 棋盘、高亮池、相机与平移（HIGHLIGHT / VIEW_DIR / worldOf）；`showcase()` 是首页的展示镜头（低角度、缓慢自转）
-  - `view.ts` — GameView：实体模型、动画、特效、事件播放；`load()` 负责把上一块棋盘的东西清干净。血条只在受伤时显示，选中的单位头顶是绿色倒三角（`selectionMark`）
+  - `view.ts` — GameView：实体模型、动画、特效、事件播放；`load()` 负责把上一块棋盘的东西清干净。血条只在受伤时显示，选中的单位头顶是绿色倒三角（`selectionMark`）；`ReachRing` 是攻击范围圈，`syncSpent` / `stoneOf` 负责把已行动的单位变成石头色
   - `models.ts` — 单位 / 建筑 / 资源点 / 五种外星人模型。`bake()` 把一个模型里不动的零件按材质合并成少量网格，`scrap()` 在模型离场时释放它独占的几何体和材质
   - `dome.ts` — 防御网的穹顶（着色器：边缘轮廓光、网格、上爬的光环、受击涟漪）
   - `plumes.ts` — 烟囱冒出的蒸汽和烟（整块棋盘共用一个 Points）
@@ -47,7 +47,7 @@
   - `scores.ts` — 小地图下方的积分榜
   - `slots.ts` — 存档位列表（保存和读取共用）
   - `showcase.ts` — 首页背后那块只用于展示的棋盘
-  - `hud.ts` — 侧边栏（建造 / 生产 / 建筑页签）、侧边栏左边的采集面板（只在人类玩家有行动点时出现）、底部的单位卡片（数值画成格子，见 `Meter`）
+  - `hud.ts` — 侧边栏（建造 / 生产 / 建筑页签）、侧边栏左边的采集面板（只在人类玩家有行动点时出现）、底部的单位卡片和生产页的单位卡片（数值画成格子，见 `Meter` / `unitCard`）
   - `overlays.ts` — 弹层服务：开局设置、骰子、横幅、结算、确认框、toast
   - `minimap.ts` — 左上角全局小地图；`paintGround` / `paintZones` / `paintForces` 也用来画存档缩略图
   - `icons.ts` — 手绘 SVG 图标（资源 / 单位 / 建筑 / 地形 / 菜单线性图标 `glyph()`）
@@ -70,6 +70,10 @@
 - **加一种外星人**要动四处：`data.ts` 的 `ALIENS`（数值与 `fx`）、`render/models.ts` 的 `buildAlien`、`ui/icons.ts` 的 `ALIEN_ART`，再在 `src/game/__tests__/aliens.test.ts` 补测试。外星人占的格子记在 `BoardIndex.others`；小蜘蛛（`s.brood`）不算在外星人上限里。
 - **每个玩家的领地大小不一样**（基地升级后多一圈）：判断“在不在领地里”一律用 `board.ts` 的 `zoneSize(p)`，不要用 `ZONE_SIZE` 常量。
 - **GameState 必须保持纯 JSON 数据**（不能有类实例、Map、函数、undefined 依赖）：存档就是 `JSON.stringify(state)`，`src/game/__tests__/save.test.ts` 会验证“任意一步存档、读档后结局一致”。改了已有字段的**含义**（不是加字段）时，在 `ui/saves.ts` 里把 `VERSION` 加一，照着 `fromSecondVersion` 写一个迁移函数、补一条测试，旧存档才不会读成另一种意思。
+- **攻击力的口径**：`data.ts` 里 `attack` 是**每一炮**的攻击力、`shots` 是炮数；界面和规则书写“攻击”一律用每回合的合计 `volley()`（`engine.ts`）。多管、对空的补充说明统一来自 `rules.ts` 的 `attackText` / `attackNotes`，不要在别处另写一套。对空攻击是 `airAttack`（每炮），没有这个字段的武器对空沿用 `attack`（`attackOn()`）；`strike` 和电脑的 `damageOf` 都按目标类别取。
+- **“这个单位本回合还有没有指令可下”只看 `canStillAct()`**（`engine.ts`）：能不能被选中、“下一个待命”、要不要变灰，都用它，不要在各处重写 `moveUsed || attackUsed`。
+- **已行动的单位变灰只在它主人的回合里**：规则上“已移动 / 已攻击”两个标记要到该玩家下一回合才开始才清零，所以 `view.syncSpent()` 判断的是“现在是不是它的回合，并且它没事可做”，这样一点结束回合就恢复。变灰靠换材质（`stoneOf()`：按材质缓存的灰色替身），**不能直接改共享材质的颜色**，那会把同类的单位一起染灰。
+- **攻击范围圈**（`ReachRing`）挂在 `scene.overlay` 上，由 `controller.render()` 里的 `view.showReach(sel ?? inspect)` 决定给谁画；半径 = 射程 + 半格，因为射程按格数（切比雪夫距离）计。选中单位移动时圈要跟着走，在 `tick()` 里同步位置。
 - **`Building.level` 是从 1 起算的级数，可以大于 2**（防御网有 5 级）。取“下一级”一律用 `engine.ts` 的 `nextLevelOf(b)`，别写 `levels[1]`；判断“是不是最高级”用 `nextLevelOf(b) === null`。
 - **换棋盘时不能留下任何东西**。`GameView.load()` 每次放上新棋盘都会跑（首页、开局设置每点一下都会重画展示棋盘），它把上一块棋盘的实体、运输车、资源点、穹顶全部移除并 `scrap()`。往 `scene.dynamic` 里**直接**加东西（不经 `create()`）时必须同时：记在一个列表里、在 `load()` 里移除并 `scrap()`。自己建的几何体 / 贴图 / `InstancedMesh` 要在 `dispose()` 里释放。曾经漏掉资源点和运输车，一局下来每帧一万九千次绘制调用。
 - **挂在单位下面、又要正对镜头的东西**（血条、选中标记）必须用 `view.ts` 的 `faceCamera()`：单位自身有朝向，直接抄相机的四元数会被单位的朝向拧歪。血条的三层（边框、已损失、剩余）必须都是透明材质、靠 `renderOrder` 排顺序：只要有一层是不透明的，它会先画，然后被半透明的底色盖住，整条血条就成了黑条。

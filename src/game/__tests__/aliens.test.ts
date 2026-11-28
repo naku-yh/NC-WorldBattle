@@ -127,7 +127,7 @@ describe('五种外星人', () => {
       const events = alienGo(s);
       expect(movesOf(events, girl.id)).toBe(0);
       // A tank in the open: armour 3 − 2.
-      expect(tank.hp).toBe(16 - (10 - 1));
+      expect(tank.hp).toBe(15 - (10 - 1));
     }
     // One tile out of reach, she has to close in first — though, like every alien, she wanders now and then.
     let fired = 0;
@@ -151,7 +151,7 @@ describe('五种外星人', () => {
     const tank = spawn(s, 0, 'tank', 9, 10);
     const events = alienGo(s);
     expect(movesOf(events, big.id)).toBe(0);
-    expect(tank.hp).toBe(16 - (15 - 1));
+    expect(tank.hp).toBe(15 - (15 - 1));
 
     const t = newGame(['human', 'human']);
     const slow = dropAlien(t, 'shentan', 5, 10);
@@ -287,8 +287,8 @@ describe('积分', () => {
 
 describe('数值调整', () => {
   it('坦克更便宜，天启双塔坦克更贵', () => {
-    expect(UNITS.tank.cost).toEqual({ ore: 500, oil: 300 });
-    expect(UNITS.apocalypse.cost).toEqual({ ore: 2000, oil: 1300 });
+    expect(UNITS.tank.cost).toEqual({ ore: 200, oil: 150 });
+    expect(UNITS.apocalypse.cost).toEqual({ ore: 2200, oil: 1300 });
     expect(UNITS.tank.cost.ore!).toBeLessThan(UNITS.twinTank.cost.ore!);
     expect(UNITS.apocalypse.cost.ore!).toBeGreaterThan(UNITS.laserTank.cost.ore! + 500);
   });
