@@ -1,7 +1,7 @@
-import { ALIENS, SPIDERLING, UNITS } from '../data';
+import { ALIENS, SKELETON, SPIDERLING, UNITS } from '../data';
 import { createGame, reduce } from '../engine';
 import { aiDecide } from '../ai';
-import type { Action, AlienKey, AlienState, Building, BuildingKey, GameEvent, GameState, PlayerState, Pt, Spiderling, Terrain, Unit, UnitKey } from '../types';
+import type { Action, AlienKey, AlienState, Building, BuildingKey, GameEvent, GameState, PlayerState, Pt, Minion, Terrain, Unit, UnitKey } from '../types';
 
 export interface MapOptions {
   size?: number;
@@ -60,14 +60,21 @@ export function spawn(s: GameState, playerId: number, key: UnitKey, x: number, y
 
 /** Puts an alien of that kind on the board, as if it had just arrived. */
 export function dropAlien(s: GameState, key: AlienKey, x: number, y: number): AlienState {
-  const a: AlienState = { id: s.nextId++, key, x, y, hp: ALIENS[key].hp, arrived: s.turn, hurt: {} };
+  const a: AlienState = { id: s.nextId++, key, x, y, hp: ALIENS[key].hp, arrived: s.turn, wave: 1, hurt: {} };
   s.aliens.push(a);
   return a;
 }
 
 /** One of 奎德's small spiders. */
-export function dropSpider(s: GameState, owner: number, x: number, y: number): Spiderling {
-  const b: Spiderling = { id: s.nextId++, owner, x, y, hp: SPIDERLING.hp };
+export function dropSpider(s: GameState, owner: number, x: number, y: number): Minion {
+  const b: Minion = { id: s.nextId++, kind: 'spider', owner, x, y, hp: SPIDERLING.hp };
+  s.brood.push(b);
+  return b;
+}
+
+/** One of the skeletons 雅千 raises where a soldier fell. */
+export function dropSkeleton(s: GameState, owner: number, x: number, y: number): Minion {
+  const b: Minion = { id: s.nextId++, kind: 'skeleton', owner, x, y, hp: SKELETON.hp };
   s.brood.push(b);
   return b;
 }
@@ -111,15 +118,17 @@ export function pathOf(events: GameEvent[]): Pt[] {
 
 /**
  * One step of letting the computer play: roll, move on, or give one order.
- * Returns why the rules refused that order, or null if they did not.
+ * Returns why the rules refused that order, or null if they did not. Every
+ * order the computer settles on is shown to `watch` before it is carried out.
  */
-export function step(s: GameState): string | null {
+export function step(s: GameState, watch?: (a: Action) => void): string | null {
   if (s.phase === 'roundStart') apply(s, { type: 'ROLL_DICE' });
   else if (s.phase === 'dice' || s.phase === 'aliens') apply(s, { type: 'NEXT' });
   else {
     const a = aiDecide(s, s.currentPlayer);
     if (!a) apply(s, { type: 'END_TURN' });
     else {
+      watch?.(a);
       const r = reduce(s, a);
       if (!r.ok) {
         apply(s, { type: 'END_TURN' });

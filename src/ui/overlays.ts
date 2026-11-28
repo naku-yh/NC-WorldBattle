@@ -1,8 +1,10 @@
-import { MAP_SIZES, MIN_TURNS, PLAYER_NAMES } from '../game/data';
-import type { GameConfig, GameState, PlayerState } from '../game/types';
-import { focusInside, h, sheen, touchOnly } from './dom';
-import { die, glyph } from './icons';
-import { RULES_HTML } from './rules';
+import { DIFFICULTIES, MAP_SIZES, MIN_TURNS, PLAYER_NAMES, RANKS, RESOURCES, START_RESOURCES, UNITS } from '../game/data';
+import { promoteCost, rankOf, rankStats } from '../game/engine';
+import type { Difficulty, GameConfig, GameState, PlayerState, ResourceKey, Unit } from '../game/types';
+import { focusInside, fmt, h, sheen, touchOnly } from './dom';
+import { die, glyph, icon, iconBox, rankIcon } from './icons';
+import { ROOM, meterEl } from './meters';
+import { RULES_HTML, costText } from './rules';
 
 /** The colours a seat may take its pick of; the first four are what the seats start on. */
 const SEAT_COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4', '#ec4899', '#94a3b8'];
@@ -15,8 +17,9 @@ export interface SetupState {
   size: number;
   /** What each seat is called, if the player has typed anything in. */
   names: string[];
-  /** Each seat's colour. */
+  /** Each seat's colour. No two seats ever wear the same one. */
   colors: string[];
+  difficulty: Difficulty;
 }
 
 const toConfig = (st: SetupState): GameConfig => ({
@@ -25,7 +28,18 @@ const toConfig = (st: SetupState): GameConfig => ({
   size: st.size,
   names: st.names.slice(0, st.count),
   colors: st.colors.slice(0, st.count),
+  difficulty: st.difficulty,
 });
+
+/** What each difficulty comes to, under its buttons. */
+const stock = (level: Difficulty): string => {
+  const r = START_RESOURCES[level];
+  return `${RESOURCES.ore.name} ${r.ore} / ${RESOURCES.oil.name} ${r.oil} / ${RESOURCES.meat.name} ${r.meat}`;
+};
+const DIFFICULTY_NOTE: Record<Difficulty, string> = {
+  low: `初始资源：${stock('low')}。电脑玩家第 13 回合之后才建军事工厂，从不建机场。`,
+  high: `初始资源：${stock('high')}。电脑玩家更早建起军事工厂和机场，各种坦克和飞机都造，进攻更有章法。`,
+};
 
 /** How dialogs pass time. The controller hands in one that stops while the match is paused. */
 export type Hold = (ms: number) => Promise<void>;
@@ -42,6 +56,8 @@ interface Dialog {
   /** Settles whatever the dialog is waiting for, so the flow behind it can end. */
   abort: () => void;
 }
+
+const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
 
 /** The turns stepper's two ends, reading and writing `st.turns` and redrawing the dialog. */
 function stepper(st: SetupState, redraw: () => void): Array<HTMLElement | string> {
@@ -138,6 +154,7 @@ export class Overlays {
       seats: [0, 1, 2, 3].map((i) => initial.seats[i] ?? 'ai'),
       names: [0, 1, 2, 3].map((i) => initial.names[i] ?? PLAYER_NAMES[i]),
       colors: [0, 1, 2, 3].map((i) => initial.colors[i] ?? SEAT_COLORS[i]),
+      difficulty: initial.difficulty ?? 'high',
     };
     const veil = h('div', { class: 'veil' });
     const dialog = h('div', { class: 'dialog' });
@@ -181,8 +198,12 @@ export class Overlays {
           'span',
           { class: 'swatches', role: 'radiogroup', 'aria-label': `第 ${i + 1} 个座位的颜色` },
           ...SEAT_COLORS.map((c) => {
-            const b = h('button', { class: `sw${st.colors[i] === c ? ' on' : ''}`, style: `--c:${c}`, title: c, 'aria-label': c });
+            // A colour another seat is wearing is marked as taken; picking it all the same swaps the two seats over.
+            const worn = st.colors.indexOf(c);
+            const taken = worn >= 0 && worn !== i;
+            const b = h('button', { class: `sw${st.colors[i] === c ? ' on' : taken ? ' taken' : ''}`, style: `--c:${c}`, title: c, 'aria-label': taken ? `${c}，已被别的座位选用，点一下交换` : c });
             b.onclick = () => {
+              if (taken) st.colors[worn] = st.colors[i];
               st.colors[i] = c;
               draw();
             };
@@ -235,15 +256,22 @@ export class Overlays {
         ),
         h('h3', {}, '座位'),
         ...seats,
+        // Three maps are too many names for half a row: they get the whole of one.
+        h('div', { class: 'setup-row' }, h('div', {}, h('h3', {}, '地图大小'), this.seg(MAP_SIZES.map((m) => [m.size, `${m.name} ${m.size}×${m.size}`] as [number, string]), st.size, (v) => {
+          st.size = v;
+          draw();
+        }))),
         h(
           'div',
           { class: 'setup-row' },
-          h('div', {}, h('h3', {}, '地图大小'), this.seg(MAP_SIZES.map((m) => [m.size, `${m.name} ${m.size}×${m.size}`] as [number, string]), st.size, (v) => {
-            st.size = v;
+          h('div', {}, h('h3', {}, `总回合数（至少 ${MIN_TURNS}）`), h('span', { class: 'stepper' }, ...stepper(st, draw))),
+          h('div', {}, h('h3', {}, '难度'), this.seg(DIFFICULTIES.map((d) => [d.key, d.name] as [Difficulty, string]), st.difficulty, (v) => {
+            st.difficulty = v;
             draw();
           })),
-          h('div', {}, h('h3', {}, `总回合数（至少 ${MIN_TURNS}）`), h('span', { class: 'stepper' }, ...stepper(st, draw))),
         ),
+        // What everyone starts out with hangs on the difficulty, so its explanation sits right under it.
+        h('p', { class: 'sub setup-note' }, DIFFICULTY_NOTE[st.difficulty]),
         // A line of its own above the buttons: sharing their row, the buttons left it no width to lie down in.
         h('p', { class: 'setup-hint' }, touchOnly() ? '单指拖动旋转 · 双指缩放 · 点“返回首页”离开' : '拖动旋转 · 滚轮缩放 · Esc 返回首页'),
         h('div', { class: 'setup-foot' }, start, rulesBtn, back),
@@ -268,11 +296,13 @@ export class Overlays {
           h('div', { class: 'who' }, h('span', { class: 'dot', style: `--c:${p.color}` }), p.name),
           die(d.rolls[0], 54),
           h('div', { class: 'reroll', title: rerolled ? '并列后加掷' : '' }, ...(rerolled ? ['加掷 ', ...d.rolls.slice(1).map((r) => die(r, 18))] : [])),
-          h('div', { class: `ap ${d.ap === 3 ? 'top' : d.ap === 1 ? 'low' : 'none'}` }, d.ap === 3 ? '行动点 +3' : d.ap === 1 ? '行动点 +1' : '本回合无行动点'),
+          h('div', { class: `ap ${d.ap >= 3 ? 'top' : d.ap > 0 ? 'low' : 'none'}` }, d.ap > 0 ? `行动点 +${d.ap}` : '本回合无行动点'),
         ),
       );
     }
-    const dialog = h('div', { class: 'dialog', style: 'text-align:center' }, h('h2', {}, `第 ${s.turn} 回合 · 掷骰子`), h('p', { class: 'sub' }, '点数最大者 3 行动点，最小者 1 行动点，中间的玩家没有行动点'), row, h('div', { class: 'dice-foot' }, '点击任意处继续'));
+    // With four players every place is worth something, so the breakdown is spelled out in full.
+    const sub = s.dice.length === 4 ? '第 1 名 3 行动点，第 2 名 2 行动点，第 3 名 1 行动点，第 4 名没有行动点' : '点数最大者 3 行动点，最小者 1 行动点，中间的玩家没有行动点';
+    const dialog = h('div', { class: 'dialog', style: 'text-align:center' }, h('h2', {}, `第 ${s.turn} 回合 · 掷骰子`), h('p', { class: 'sub' }, sub), row, h('div', { class: 'dice-foot' }, '点击任意处继续'));
     veil.append(dialog);
     await new Promise<void>((resolve) => {
       let done = false;
@@ -344,6 +374,72 @@ export class Overlays {
     const card = h('div', { class: 'dialog over-dialog', style: 'text-align:center' }, h('h2', {}, '战斗结束'), h('h1', { class: 'winner' }, h('b', { style: `color:${s.players[top.player].color}` }, s.players[top.player].name), ' 获胜'), h('p', { class: 'sub' }, why), table, h('div', { class: 'gbtn-col' }, again, home));
     veil.append(card);
     const close = this.open(veil);
+    focusInside(card);
+  }
+
+  /**
+   * The step from one rank up to the next for a unit: its insignia and the next
+   * one, what each of its figures comes to by it, and what the step costs. `pay`
+   * is called only if the player goes through with it.
+   */
+  promotion(s: GameState, u: Unit, pay: () => void): void {
+    const p = s.players[s.currentPlayer];
+    const rank = rankOf(u);
+    const now = rankStats(u.key, rank);
+    const then = rankStats(u.key, rank + 1);
+    const cost = promoteCost(u.key, rank);
+    const lacks = RES_KEYS.filter((k) => cost[k]).some((k) => p.resources[k] < cost[k]!);
+    const veil = h('div', { class: 'veil soft' });
+    const done = (): void => {
+      off();
+      close();
+    };
+    // One press, and the price is on it: each resource as its icon and its number and nothing more, red where the player is short.
+    const go = h(
+      'button',
+      { class: 'rank-go', disabled: lacks, title: lacks ? '资源不足' : `花 ${costText(cost)}，晋升为${RANKS[rank].name}` },
+      h('b', {}, '升级'),
+      ...RES_KEYS.filter((k) => cost[k]).map((k) => h('span', { class: `rank-cost${p.resources[k] < cost[k]! ? ' short' : ''}`, title: `${RESOURCES[k].name} ${cost[k]}` }, h('span', { class: 'ico', html: icon(k) }), fmt(cost[k]!))),
+    );
+    go.onclick = () => {
+      done();
+      pay();
+    };
+    const no = h('button', { class: 'btn small ghost' }, '取消');
+    no.onclick = done;
+    const insignia = (r: number): HTMLElement[] => [iconBox(rankIcon(r), 'var(--accent)'), h('span', { class: 'rank-name' }, RANKS[r - 1].name)];
+    // Each figure as it stands, with what the rank adds on in another colour, then "[ 15+8 ]". A figure that outgrows its row is drawn in proportion, so that the part the rank adds always shows.
+    const shells = UNITS[u.key].shots;
+    const gains = (label: string, was: number, will: number, room: number): HTMLElement => {
+      const k = will <= room ? 1 : room / will;
+      const base = Math.max(1, Math.round(was * k));
+      return meterEl({ label, base, value: Math.min(room, Math.max(base + 1, Math.round(will * k))), room, text: `[ ${was}+${will - was} ]` });
+    };
+    const card = h(
+      'div',
+      { class: 'glass rank-card' },
+      h('h2', {}, '军衔晋升'),
+      h('p', { class: 'sub' }, `${UNITS[u.key].name} · ${p.name}`),
+      h(
+        'div',
+        { class: 'rank-body' },
+        h(
+          'div',
+          { class: 'rank-left' },
+          h('div', { class: 'rank-steps' }, ...insignia(rank), h('span', { class: 'rank-arrow', html: glyph('next') }), ...insignia(rank + 1)),
+          h('div', { class: 'rank-meters' }, gains('生命', now.hp, then.hp, ROOM.health), gains('攻击', now.attack * shells, then.attack * shells, ROOM.attack), gains('防御', now.defense, then.defense, ROOM.defense)),
+        ),
+        h('div', { class: 'rank-right' }, go, no),
+      ),
+    );
+    veil.append(card);
+    // Out the way the player came in: the dark round about, or Escape.
+    veil.onclick = (e) => {
+      if (e.target === veil) done();
+    };
+    const off = this.onEscape(done);
+    const close = this.open(veil, done);
+    sheen(card);
     focusInside(card);
   }
 

@@ -1016,6 +1016,50 @@ button {
   flex: none;
 }
 
+/* The soldiers inside a held building, one button each: the one that fires next is lit. */
+.gunners {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.card .gunner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 2px 3px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.card .gunner .icon,
+.card .gunner .icon svg {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+}
+
+.card .gunner .icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.card .gunner.on {
+  border-color: #f5b83d;
+  background: rgba(245, 184, 61, 0.16);
+  box-shadow: 0 0 0 1px rgba(245, 184, 61, 0.5);
+}
+
+.card .gunner:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .card .terrain,
 .card .help {
   color: var(--muted);
@@ -1201,6 +1245,16 @@ button {
   outline-offset: 1px;
 }
 
+/* Worn by another seat: dimmed with a cross through it. Picking it all the same swaps the two seats. */
+.swatches .sw.taken {
+  opacity: 0.4;
+  background-image: linear-gradient(45deg, transparent 45%, #fff 45%, #fff 55%, transparent 55%);
+}
+
+.swatches .sw.taken:hover {
+  opacity: 0.75;
+}
+
 .setup-row {
   display: flex;
   gap: 26px;
@@ -1218,6 +1272,17 @@ button {
 
 .setup-row .seg button {
   white-space: nowrap;
+}
+
+.setup-row + .setup-row {
+  margin-top: 14px;
+}
+
+/* What a difficulty comes to, beside its buttons. */
+.setup-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .stepper {
@@ -1797,6 +1862,14 @@ summary {
   margin: 4px 0;
 }
 
+/* A heading inside a fold-out: the hidden aliens under the five known ones. */
+.rules-panel .rule-body h4 {
+  margin: 10px 0 2px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .rules-panel ul {
   padding-left: 16px;
   margin: 4px 0;
@@ -1837,6 +1910,206 @@ summary {
 .rule-row .sub {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* ---------- ranks ---------- */
+/* The rank a unit holds, said on its card with its insignia. */
+.tag.rank-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  background: rgba(245, 184, 61, 0.14);
+}
+
+.rank-tag-ico {
+  display: inline-flex;
+}
+
+.rank-tag-ico svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+/* The step up to the next rank: insignia, figures, and the price on one press. */
+.rank-card {
+  width: min(600px, 92vw);
+  padding: 22px 26px 24px;
+  color: var(--text);
+}
+
+.rank-card h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.rank-card .sub {
+  margin: 2px 0 10px;
+}
+
+.rank-body {
+  display: flex;
+  gap: 22px;
+  align-items: stretch;
+}
+
+.rank-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.rank-steps {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 12px;
+}
+
+.rank-steps .icon {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: #0b0d12;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.rank-steps .icon svg {
+  width: 34px;
+  height: 34px;
+  display: block;
+}
+
+.rank-steps .rank-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.rank-steps .rank-arrow {
+  display: inline-flex;
+  margin: 0 4px;
+  color: var(--accent);
+}
+
+.rank-steps .rank-arrow svg {
+  width: 24px;
+  height: 24px;
+}
+
+.rank-meters {
+  display: grid;
+  gap: 6px;
+}
+
+.rank-meters .meter {
+  font-size: 13px;
+  grid-template-columns: 2.4em auto minmax(6.5em, auto);
+}
+
+/* What it has at its rank now, and what the next one adds. */
+.rank-meters .cells i {
+  background: #86efac;
+}
+
+.rank-meters .cells i.up {
+  background: #fb923c;
+}
+
+.rank-right {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  width: 150px;
+  flex: none;
+}
+
+/* The one press that pays for it all: dark, with the price in icons. */
+.rank-go {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 18px 12px 16px;
+  border: 0;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #171a22, #07080b);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 10px 24px rgba(0, 0, 0, 0.45);
+  color: #f5f7fb;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.2s;
+}
+
+.rank-go b {
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.rank-go .rank-cost {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-go .rank-cost .ico {
+  display: inline-flex;
+}
+
+.rank-go .rank-cost .ico svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.rank-go .rank-cost.short {
+  color: #f87171;
+}
+
+.rank-go:hover:not(:disabled) {
+  transform: scale(1.03);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 12px 28px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(245, 184, 61, 0.5);
+}
+
+.rank-go:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.rank-go:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rank-go:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.75);
+  outline-offset: 3px;
+}
+
+@media (max-width: 640px) {
+  .rank-body {
+    flex-direction: column;
+  }
+
+  .rank-right {
+    width: auto;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+  }
 }
 
 /* ---------- liquid glass ---------- */
@@ -3156,3 +3429,4 @@ kbd.gbtn-hint {
     animation-delay: 0s;
   }
 }
+

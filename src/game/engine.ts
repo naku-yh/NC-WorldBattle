@@ -1,35 +1,47 @@
 import {
   ALIEN_CAP,
   ALIEN_EVERY,
+  ALIEN_GROWTH,
   ALIEN_KEYS,
   ALIENS,
-  AP_BOTTOM,
-  AP_TOP,
+  AP_BY_RANK,
   BOARD_SIZE,
   BROOD_CAP,
   BUILDABLE,
   BUILDINGS,
+  CITY,
+  CITY_CRUSH,
+  CITY_RANGE,
   HARVEST_YIELD,
+  HIDDEN_CHANCE,
+  HIDDEN_KEYS,
   HQ_SIZE,
   MAX_BOARD,
   MIN_BOARD,
   MIN_TURNS,
+  MINIONS,
   PLAYER_COLORS,
   PLAYER_NAMES,
+  PROMOTE_COST,
+  RANKS,
   RESOURCES,
   SCORE_BUILDING,
   SCORE_LAST_HIT,
   SCORE_SPIDER,
   SCORE_UNIT,
+  SECOND_FORMS,
+  SKELETON,
   SPIDERLING,
   START_RESOURCES,
   START_TRUCKS,
   UNITS,
   UPGRADE_HP_BONUS,
+  isHidden,
 } from './data';
 import { Rng } from './rng';
 import {
   BoardIndex,
+  DIRS4,
   DIRS8,
   FACTORY_LOCAL,
   NODE_LAYOUT,
@@ -38,15 +50,19 @@ import {
   buildingCenter,
   tilesOf,
   cheb,
+  cityAt,
   cornersOf,
   distToBuilding,
   footprint,
+  holderOf,
+  inBoard,
   isFree,
   isMusterLocal,
   isReservedLocal,
   key,
   laneOf,
   moveModeOf,
+  nearestOpen,
   reachable,
   ringTiles,
   terrainAt,
@@ -58,25 +74,31 @@ import { generateTerrain, plainTerrain } from './terrain';
 import type {
   Action,
   AlienDef,
+  AlienKey,
   AlienState,
   AttackStyle,
+  BonusClass,
   Building,
   BuildingDef,
   BuildingKey,
   BuildingLevel,
+  CityBuilding,
   CombatStats,
   Cost,
   DiceEntry,
+  Difficulty,
   EntityRef,
   GameConfig,
   GameEvent,
   GameState,
+  Minion,
+  MinionDef,
   MoveMode,
   PlayerState,
   Pt,
   ResourceKey,
   ResourceNode,
-  Spiderling,
+  SplashHit,
   TargetClass,
   Tone,
   Unit,
@@ -105,6 +127,7 @@ export function createGame(cfg: GameConfig): GameState {
   if (seats.length < 2) throw new Error('至少需要 2 名玩家');
   const rng = new Rng(cfg.seed ?? ((Date.now() * 2654435761) >>> 0));
   const totalTurns = Math.max(MIN_TURNS, Math.floor(cfg.totalTurns) || MIN_TURNS);
+  const difficulty: Difficulty = cfg.difficulty ?? 'high';
   const boardSize = Math.min(MAX_BOARD, Math.max(MIN_BOARD, Math.floor(cfg.size ?? BOARD_SIZE) || BOARD_SIZE));
   const corners = cornersOf(boardSize);
   const seatOf = (i: number): number => SEAT_CORNERS[seats.length][i];
@@ -133,7 +156,7 @@ export function createGame(cfg: GameConfig): GameState {
       color: cfg.colors?.[i] || PLAYER_COLORS[i],
       alive: true,
       corner: seatOf(i),
-      resources: { ...START_RESOURCES },
+      resources: { ...START_RESOURCES[difficulty] },
       ap: 0,
       trucks: START_TRUCKS,
       buildings: [mk('hq', 0, 0, HQ_SIZE, HQ_SIZE), mk('factory', FACTORY_LOCAL.u, FACTORY_LOCAL.v, 1, 1)],
@@ -151,7 +174,10 @@ export function createGame(cfg: GameConfig): GameState {
 
   const board = { boardSize, corners, waterway: 'vertical' as const };
   // Every map is rolled afresh: which way the waterway runs, where it bends, the woods and hills.
-  const map = cfg.terrain === 'plain' ? { terrain: plainTerrain(boardSize), waterway: board.waterway } : generateTerrain(rng, boardSize, players.map((p) => p.corner));
+  const map =
+    cfg.terrain === 'plain'
+      ? { terrain: plainTerrain(boardSize), waterway: board.waterway, city: [] as Array<{ kind: CityBuilding['kind']; x: number; y: number }> }
+      : generateTerrain(rng, boardSize, players.map((p) => p.corner));
 
   return {
     rng: rng.state,
@@ -175,6 +201,8 @@ export function createGame(cfg: GameConfig): GameState {
     // The first alien is due so many rounds in; each one that arrives rolls the date of the next.
     nextAlien: rng.int(ALIEN_EVERY[0], ALIEN_EVERY[1]),
     aliensSeen: 0,
+    city: map.city.map((c) => ({ id: nextId++, kind: c.kind, x: c.x, y: c.y, hp: CITY[c.kind].hp, occupants: [] })),
+    difficulty,
     log: [],
     logId: 1,
     ranking: [],
@@ -209,7 +237,8 @@ export function netDefense(p: PlayerState): number {
 /** Total attack power: every living combat unit plus powered defence structures. */
 export function attackPower(p: PlayerState): number {
   let n = 0;
-  for (const u of p.units) n += volley(UNITS[u.key]);
+  // As each unit stands, rank and all; the ground under it is left out of the count.
+  for (const u of p.units) n += rankStats(u.key, rankOf(u)).attack * UNITS[u.key].shots;
   for (const b of p.buildings) {
     if (!b.powered) continue;
     n += volley(BUILDINGS[b.key].levels[b.level - 1]);
@@ -222,6 +251,12 @@ export const volley = (st: Pick<CombatStats, 'attack' | 'shots'>): number => st.
 
 /** The attack `st` brings to bear on a target of class `cls`: what it keeps for aircraft, if anything, and otherwise its attack. */
 export const attackOn = (st: Pick<CombatStats, 'attack' | 'airAttack'>, cls: TargetClass): number => (cls === 'air' && st.airAttack !== undefined ? st.airAttack : st.attack);
+
+/** `attackOn`, and twice as much again for whatever the weapon is specially hard on. `vs` is what the target is: a soldier, a tank or an alien. */
+export function attackAgainst(st: Pick<CombatStats, 'attack' | 'airAttack' | 'doubleVs'>, cls: TargetClass, vs: BonusClass | null = null): number {
+  const attack = attackOn(st, cls);
+  return vs && st.doubleVs?.includes(vs) ? attack * 2 : attack;
+}
 
 export function countBuilding(p: PlayerState, k: BuildingKey): number {
   return p.buildings.filter((b) => b.key === k).length;
@@ -287,7 +322,7 @@ function spotError(s: GameState, p: PlayerState, idx: BoardIndex, def: BuildingD
       if (isMusterLocal(u, v)) return '这里是出兵点，要留空';
       if (terrainAt(s, tx, ty) !== 'plain') return '这种地形上不能建造';
       const k = key(tx, ty);
-      if (idx.blocked.has(k)) return '这里已有建筑或资源点';
+      if (idx.blocked.has(k) || idx.city.has(k)) return '这里已有建筑或资源点';
       if (idx.ground.has(k)) return '有单位停在这里';
     }
   }
@@ -446,9 +481,11 @@ interface Target {
   pos: Pt;
   defense: number;
   cls: TargetClass;
+  /** What it is, for the weapons that hit some things twice as hard: a soldier, a tank or an alien. */
+  vs: BonusClass | null;
   name: string;
   /** Live object so callers can take HP off it. */
-  obj: Unit | Building | AlienState | Spiderling;
+  obj: Unit | Building | AlienState | Minion | CityBuilding;
   isHq: boolean;
 }
 
@@ -456,9 +493,44 @@ export function alienById(s: GameState, id: number): AlienState | null {
   return s.aliens.find((a) => a.id === id) ?? null;
 }
 
-export function spiderById(s: GameState, id: number): Spiderling | null {
+/** Adds `more` into `into`, player by player. */
+function addLedger(into: Record<number, number>, more: Record<number, number>): Record<number, number> {
+  const out: Record<number, number> = { ...into };
+  for (const [k, v] of Object.entries(more)) out[Number(k)] = (out[Number(k)] ?? 0) + v;
+  return out;
+}
+
+/**
+ * An alien's figures as it stands. The first to arrive in a match has the
+ * reference card's; every one after is stronger than the last by `ALIEN_GROWTH`
+ * of the card's life, attack and defence. How far it reaches and how it gets
+ * about are the same for all of a kind, and the hidden ones grow just as the
+ * others do.
+ *
+ * A hidden one that is down stands in its second shape's figures instead
+ * (`SECOND_FORMS`), grown by the same share as its first, and worth no more
+ * and no less than before.
+ */
+export function alienStats(a: AlienState): AlienDef {
+  const d = ALIENS[a.key];
+  // Down is out for a second shape: it does not change or split again, whatever the first one did.
+  let card: AlienDef = d;
+  if (isHidden(a.key) && a.form === 2 && SECOND_FORMS[a.key]) {
+    const { changes, splits, ...first } = d;
+    card = { ...first, ...SECOND_FORMS[a.key]! };
+  }
+  const scale = 1 + ALIEN_GROWTH * ((a.wave ?? 1) - 1);
+  if (scale === 1) return card;
+  const grown = (n: number): number => Math.round(n * scale);
+  return { ...card, hp: grown(card.hp), attack: grown(card.attack), defense: grown(card.defense), ...(card.counter === undefined ? {} : { counter: grown(card.counter) }) };
+}
+
+export function minionById(s: GameState, id: number): Minion | null {
   return s.brood.find((b) => b.id === id) ?? null;
 }
+
+/** What one of the aliens' small fry can do: a spider's card, unless it says it is a skeleton. */
+export const minionDef = (b: Minion): MinionDef => MINIONS[b.kind ?? 'spider'];
 
 export function unitById(s: GameState, id: number): { unit: Unit; owner: PlayerState } | null {
   for (const p of s.players) {
@@ -468,39 +540,103 @@ export function unitById(s: GameState, id: number): { unit: Unit; owner: PlayerS
   return null;
 }
 
-/** Whether a unit still has an order it may take this turn: a move, or a shot it has not fired. */
+/** Whether a unit still has an order it may take this turn: a move, or a shot it has not fired. Inside a building there is nowhere to move to. */
 export function canStillAct(u: Unit): boolean {
-  return !u.moveUsed || (UNITS[u.key].attack > 0 && !u.attackUsed);
+  const d = UNITS[u.key];
+  if (u.inside !== undefined) return d.attack > 0 && !u.attackUsed;
+  return !u.moveUsed || (d.attack > 0 && !u.attackUsed);
 }
 
-/** A unit's armour plus whatever the ground beneath it adds. Never negative. */
+export function cityById(s: GameState, id: number): CityBuilding | null {
+  return s.city.find((c) => c.id === id) ?? null;
+}
+
+/** A unit's rank, from 1: the first for anything that does not say (see `RANKS`). */
+export const rankOf = (u: Pick<Unit, 'rank'>): number => u.rank ?? 1;
+
+/**
+ * A fighting unit's card figures at a rank: attack (what it has for aircraft
+ * included) and life by the rank's share of the card's, each rounded to a
+ * whole point, and armour by the rank's fixed addition to the card's.
+ */
+export function rankStats(k: UnitKey, rank = 1): { attack: number; airAttack?: number; hp: number; defense: number } {
+  const d = UNITS[k];
+  const r = RANKS[Math.min(RANKS.length, Math.max(1, rank)) - 1];
+  return {
+    attack: Math.round(d.attack * r.power),
+    ...(d.airAttack === undefined ? {} : { airAttack: Math.round(d.airAttack * r.power) }),
+    hp: Math.round(d.hp * r.power),
+    defense: d.defense + r.armor,
+  };
+}
+
+/** How much life a unit has at full strength: the card's, grown with its rank. */
+export const maxHpOf = (u: Pick<Unit, 'key' | 'rank'>): number => rankStats(u.key, rankOf(u)).hp;
+
+/** A unit's armour at its rank plus whatever the ground beneath it adds. Never negative. */
 export function defenseOf(s: GameState, u: Unit): number {
   const d = UNITS[u.key];
-  return Math.max(0, d.defense + (terrainEffect(s, d.family, u.x, u.y).defense ?? 0));
+  return Math.max(0, rankStats(u.key, rankOf(u)).defense + (terrainEffect(s, d.family, u.x, u.y).defense ?? 0));
 }
 
-/** A unit type's stats straight off the reference card. */
-export function baseStats(k: UnitKey): CombatStats {
-  const { attack, shots, defense, range, canHit, pierce, airAttack } = UNITS[k];
-  return { attack, shots, defense, range, canHit, pierce, ...(airAttack === undefined ? {} : { airAttack }) };
+/** A unit type's figures at a rank, straight off the reference card as the rank has grown them. */
+export function baseStats(k: UnitKey, rank = 1): CombatStats {
+  const { shots, range, canHit, pierce, doubleVs, splash } = UNITS[k];
+  const r = rankStats(k, rank);
+  return {
+    attack: r.attack,
+    shots,
+    ...(r.airAttack === undefined ? {} : { airAttack: r.airAttack }),
+    defense: r.defense,
+    range,
+    canHit,
+    pierce,
+    ...(doubleVs ? { doubleVs } : {}),
+    ...(splash ? { splash } : {}),
+  };
 }
 
-/** A unit's stats as it stands: its own, adjusted by the terrain it is on. */
+/** A unit's stats as it stands: its own at its rank, adjusted by the terrain it is on. */
 export function statsOf(s: GameState, u: Unit): CombatStats {
   const d = UNITS[u.key];
+  const r = rankStats(u.key, rankOf(u));
   const e = terrainEffect(s, d.family, u.x, u.y);
   const by = e.attack ?? 0;
+  // From inside a house or tower a weapon reaches no further than its windows let it.
+  const reach = u.inside === undefined ? Infinity : CITY_RANGE;
   return {
-    attack: Math.max(0, d.attack + by),
+    attack: Math.max(0, r.attack + by),
     shots: d.shots,
     // The ground counts for as much against aircraft as against anything else.
-    ...(d.airAttack === undefined ? {} : { airAttack: Math.max(0, d.airAttack + by) }),
+    ...(r.airAttack === undefined ? {} : { airAttack: Math.max(0, r.airAttack + by) }),
     defense: defenseOf(s, u),
     // A weapon always reaches the next tile over, whatever woods it is sitting in.
-    range: d.range > 0 ? Math.max(1, d.range + (e.range ?? 0)) : 0,
+    range: d.range > 0 ? Math.max(1, Math.min(reach, d.range + (e.range ?? 0))) : 0,
     canHit: d.canHit,
     pierce: d.pierce,
+    ...(d.doubleVs ? { doubleVs: d.doubleVs } : {}),
+    ...(d.splash ? { splash: d.splash } : {}),
   };
+}
+
+/** What the promotion from `rank` costs, by resource: a share of the unit's own price (see `PROMOTE_COST`). */
+export function promoteCost(k: UnitKey, rank = 1): Cost {
+  const out: Cost = {};
+  const share = PROMOTE_COST[rank - 1] ?? 0;
+  for (const key of RES_KEYS) {
+    const v = Math.round((UNITS[k].cost[key] ?? 0) * share);
+    if (v) out[key] = v;
+  }
+  return out;
+}
+
+/** Why player `p` cannot raise the unit to its next rank, or null when they can. Whether it is their turn is for the order to say. */
+export function canPromote(p: PlayerState, unitId: number): string | null {
+  const u = p.units.find((x) => x.id === unitId);
+  if (!u) return '找不到该单位';
+  if (rankOf(u) >= RANKS.length) return '已是最高军衔';
+  if (!canAfford(p, promoteCost(u.key, rankOf(u)))) return '资源不足';
+  return null;
 }
 
 export function buildingById(s: GameState, id: number): { building: Building; owner: PlayerState } | null {
@@ -515,19 +651,37 @@ function targetOf(s: GameState, ref: EntityRef): Target | null {
   if (ref.kind === 'alien') {
     const a = alienById(s, ref.id);
     if (!a) return null;
-    const d = ALIENS[a.key];
-    return { ref, owner: -1, pos: { x: a.x, y: a.y }, defense: d.defense, cls: 'ground', name: d.name, obj: a, isHq: false };
+    const d = alienStats(a);
+    return { ref, owner: -1, pos: { x: a.x, y: a.y }, defense: d.defense, cls: d.flies ? 'air' : 'ground', vs: 'alien', name: d.name, obj: a, isHq: false };
   }
-  if (ref.kind === 'spider') {
-    const b = spiderById(s, ref.id);
+  if (ref.kind === 'brood') {
+    const b = minionById(s, ref.id);
     if (!b) return null;
-    return { ref, owner: -1, pos: { x: b.x, y: b.y }, defense: SPIDERLING.defense, cls: 'ground', name: SPIDERLING.name, obj: b, isHq: false };
+    const d = minionDef(b);
+    return { ref, owner: -1, pos: { x: b.x, y: b.y }, defense: d.defense, cls: 'ground', vs: 'alien', name: d.name, obj: b, isHq: false };
   }
   if (ref.kind === 'unit') {
     const hit = unitById(s, ref.id);
-    if (!hit) return null;
+    // Nobody inside a building can be shot at: only the building can.
+    if (!hit || hit.unit.inside !== undefined) return null;
     const d = UNITS[hit.unit.key];
-    return { ref, owner: hit.owner.id, pos: { x: hit.unit.x, y: hit.unit.y }, defense: defenseOf(s, hit.unit), cls: d.unitClass, name: d.name, obj: hit.unit, isHq: false };
+    return {
+      ref,
+      owner: hit.owner.id,
+      pos: { x: hit.unit.x, y: hit.unit.y },
+      defense: defenseOf(s, hit.unit),
+      cls: d.unitClass,
+      vs: d.family === 'soldier' || d.family === 'tank' ? d.family : null,
+      name: d.name,
+      obj: hit.unit,
+      isHq: false,
+    };
+  }
+  if (ref.kind === 'city') {
+    const c = cityById(s, ref.id);
+    if (!c) return null;
+    const holder = holderOf(s, c);
+    return { ref, owner: holder ? holder.id : -1, pos: { x: c.x, y: c.y }, defense: CITY[c.kind].defense, cls: 'building', vs: null, name: CITY[c.kind].name, obj: c, isHq: false };
   }
   const hit = buildingById(s, ref.id);
   if (!hit || !targetable(hit.building)) return null;
@@ -537,6 +691,7 @@ function targetOf(s: GameState, ref: EntityRef): Target | null {
     pos: buildingCenter(hit.building),
     defense: netDefense(hit.owner),
     cls: 'building',
+    vs: null,
     name: BUILDINGS[hit.building.key].levels[hit.building.level - 1].name,
     obj: hit.building,
     isHq: hit.building.key === 'hq',
@@ -558,9 +713,10 @@ function canReach(s: GameState, c: Combatant, t: Target): boolean {
 export function moveRange(s: GameState, unitId: number): Pt[] {
   const p = s.players[s.currentPlayer];
   const u = p?.units.find((x) => x.id === unitId);
-  if (!p || !u || u.moveUsed) return [];
+  if (!p || !u || u.moveUsed || u.inside !== undefined) return [];
   const idx = new BoardIndex(s);
-  return [...reachable(idx, s, u, moveModeOf(u.key), UNITS[u.key].move, u.id).values()].map((path) => path[path.length - 1]);
+  // The soldier itself goes in with the question: it is what lets its own kind through a building's door.
+  return [...reachable(idx, s, u, moveModeOf(u.key), UNITS[u.key].move, u.id, u).values()].map((path) => path[path.length - 1]);
 }
 
 /** Everything a unit or armed building can shoot right now. */
@@ -587,7 +743,14 @@ export function attackTargets(s: GameState, source: { kind: 'unit' | 'building';
     if (t && canReach(s, c, t)) out.push(t.ref);
   }
   for (const b of s.brood) {
-    const t = targetOf(s, { kind: 'spider', id: b.id });
+    const t = targetOf(s, { kind: 'brood', id: b.id });
+    if (t && canReach(s, c, t)) out.push(t.ref);
+  }
+  // A house or tower the other side holds is shot at like any building: that is the only way at the soldiers inside it.
+  for (const city of s.city) {
+    const holder = holderOf(s, city);
+    if (!holder || holder.id === p.id) continue;
+    const t = targetOf(s, { kind: 'city', id: city.id });
     if (t && canReach(s, c, t)) out.push(t.ref);
   }
   return out;
@@ -609,9 +772,11 @@ function rollOff(rng: Rng, initial: DiceEntry[], mode: 'max' | 'min'): DiceEntry
 }
 
 /**
- * Everyone rolls at once. The top roller gets AP_TOP, the bottom roller
- * AP_BOTTOM and everyone in between nothing. Ties for either spot are settled
- * by re-rolling only the tied players. The returned list is in play order.
+ * Everyone rolls at once. The places are worth what `AP_BY_RANK` says: with
+ * four players first, second and third all get something, with fewer only the
+ * top and the bottom do. Ties are settled by re-rolling only the tied players,
+ * for the top spot and the bottom spot, and with four players for second place
+ * too. The returned list is in play order.
  */
 export function rollDice(rng: Rng, ids: number[]): DiceEntry[] {
   const entries: DiceEntry[] = ids.map((player) => ({ player, rolls: [rng.int(1, 6)], ap: 0, rank: 0 }));
@@ -631,10 +796,19 @@ export function rollDice(rng: Rng, ids: number[]): DiceEntry[] {
   } else {
     lastE = bottom.length > 1 ? rollOff(rng, bottom, 'min') : bottom[0];
   }
-  const order = [first, ...rest.filter((e) => e !== lastE), lastE];
+  // Between the two ends everyone is placed by their last roll, lowest last. With four players second place is worth
+  // more than third, so two that are still level there throw for it.
+  const middle = rest.filter((e) => e !== lastE);
+  middle.sort((a, b) => last(b) - last(a) || a.player - b.player);
+  if (middle.length === 2 && last(middle[0]) === last(middle[1])) {
+    const second = rollOff(rng, middle, 'max');
+    middle.sort((a, b) => (b === second ? 1 : 0) - (a === second ? 1 : 0));
+  }
+  const order = [first, ...middle, lastE];
+  const worth = AP_BY_RANK[order.length] ?? AP_BY_RANK[2];
   order.forEach((e, i) => {
     e.rank = i;
-    e.ap = i === 0 ? AP_TOP : i === order.length - 1 ? AP_BOTTOM : 0;
+    e.ap = worth[i] ?? 0;
   });
   return order;
 }
@@ -648,11 +822,8 @@ export function netDamage(attack: number, defense: number, pierce = false): numb
   return Math.max(0, attack - (pierce ? 0 : defense));
 }
 
-function strike(s: GameState, attacker: number, t: Target, st: CombatStats, events: GameEvent[]): void {
-  // Each shell is worked out on its own, so armour tells twice against a weapon that fires twice.
-  const attack = attackOn(st, t.cls);
-  let dmg = 0;
-  for (let i = 0; i < st.shots; i++) dmg += netDamage(attack, t.defense, st.pierce);
+/** Takes `dmg` off `t`, notes it, and takes the thing itself away should nothing be left of it. */
+function applyDamage(s: GameState, attacker: number, t: Target, dmg: number, events: GameEvent[]): void {
   t.obj.hp -= dmg;
   events.push({ type: 'damage', target: t.ref, amount: dmg, pos: t.pos });
   if (attacker >= 0) {
@@ -663,6 +834,178 @@ function strike(s: GameState, attacker: number, t: Target, st: CombatStats, even
     if (alien) alien.hurt[attacker] = (alien.hurt[attacker] ?? 0) + dmg;
   }
   if (t.obj.hp <= 0) destroyTarget(s, t, attacker, events);
+}
+
+type AttackEvent = Extract<GameEvent, { type: 'attack' }>;
+
+/**
+ * What a splash weapon catches on the four tiles round what it was aimed at,
+ * up, down, left and right: whatever of the other side's stands on them, each
+ * for half the attack before its own defence. A structure is struck over every
+ * tile of it, so the blast reaches round its whole footprint.
+ */
+function splashAround(s: GameState, attacker: number, t: Target, st: CombatStats): Array<{ hit: Target; dmg: number }> {
+  const idx = new BoardIndex(s);
+  const seeds = t.ref.kind === 'building' ? tilesOf(t.obj as Building) : [t.pos];
+  const half = Math.floor(attackOn(st, 'ground') / 2);
+  const done = new Set<string>([`${t.ref.kind}:${t.ref.id}`]);
+  const out: Array<{ hit: Target; dmg: number }> = [];
+  const take = (ref: EntityRef): void => {
+    const k = `${ref.kind}:${ref.id}`;
+    if (done.has(k)) return;
+    done.add(k);
+    const hit = targetOf(s, ref);
+    // Never anything of the shooter's own, and nothing this weapon could not have been aimed at in the first place.
+    if (!hit || hit.owner === attacker || !st.canHit.includes(hit.cls)) return;
+    out.push({ hit, dmg: netDamage(half, hit.defense, st.pierce) });
+  };
+  for (const q of seeds) {
+    for (const [dx, dy] of DIRS4) {
+      const x = q.x + dx;
+      const y = q.y + dy;
+      if (!inBoard(x, y, s.boardSize)) continue;
+      const k = key(x, y);
+      // Wings are above the blast: only something standing on the ground is caught.
+      const u = idx.ground.get(k);
+      if (u) {
+        take({ kind: 'unit', id: u.id });
+        continue;
+      }
+      const beast = idx.others.get(k);
+      if (beast !== undefined) {
+        take(alienById(s, beast) ? { kind: 'alien', id: beast } : { kind: 'brood', id: beast });
+        continue;
+      }
+      const house = cityAt(s, x, y);
+      if (house) {
+        take({ kind: 'city', id: house.id });
+        continue;
+      }
+      const b = s.players.flatMap((pl) => pl.buildings).find((b) => b.w > 0 && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h);
+      if (b) take({ kind: 'building', id: b.id });
+    }
+  }
+  return out;
+}
+
+/**
+ * One full attack from `source` at `t`: the shot on its way, then all it does,
+ * splash included. Whatever it catches that hits back (see `counter`) strikes
+ * in return, unless this shot is itself such a blow.
+ */
+function shoot(
+  s: GameState,
+  attacker: number,
+  source: EntityRef,
+  from: Pt,
+  t: Target,
+  st: CombatStats,
+  style: AttackStyle,
+  events: GameEvent[],
+  echo = false,
+): AttackEvent {
+  const shot: AttackEvent = { type: 'attack', source, target: t.ref, from, to: t.pos, shots: st.shots, style };
+  events.push(shot);
+  // Who the blast will catch is settled before the shot lands: soldiers thrown out of a collapsing building are not caught by the shell that brought it down.
+  const around = st.splash === 'cross' ? splashAround(s, attacker, t, st) : [];
+  // Each shell is worked out on its own, so armour tells twice against a weapon that fires twice.
+  const attack = attackAgainst(st, t.cls, t.vs);
+  let dmg = 0;
+  for (let i = 0; i < st.shots; i++) dmg += netDamage(attack, t.defense, st.pierce);
+  applyDamage(s, attacker, t, dmg, events);
+  if (!echo) counter(s, t.ref, source, events);
+  if (around.length) shot.splash = [];
+  for (const { hit, dmg: side } of around) {
+    applyDamage(s, attacker, hit, side, events);
+    if (!echo) counter(s, hit.ref, source, events);
+    shot.splash!.push({ target: hit.ref, amount: side, pos: hit.pos });
+  }
+  return shot;
+}
+
+/**
+ * 雅千's answer to being struck: the attack set aside for it on her card, at
+ * once, at whatever struck her, from however far away it did. A blow that is itself an answer sets off
+ * no other (the `echo` on `shoot`), so nothing goes back and forth for ever.
+ * Nor do the base guns ever answer one: only a shot of hers that opens the
+ * exchange brings them out (see `bite` and the ATTACK order).
+ */
+function counter(s: GameState, struck: EntityRef, by: EntityRef, events: GameEvent[]): void {
+  // Only something of the players' can have struck her: aliens never turn on one another.
+  if (struck.kind !== 'alien' || (by.kind !== 'unit' && by.kind !== 'building')) return;
+  const a = alienById(s, struck.id);
+  // Down, or changed shape under the blow, there is nothing left to answer with.
+  if (!a) return;
+  const def = alienStats(a);
+  const t = targetOf(s, by);
+  if (def.counter === undefined || !t) return;
+  addLog(s, `${def.name}反击`, 'combat');
+  // With the attack set aside for striking back, not the one she attacks with.
+  shoot(s, -1, struck, { x: a.x, y: a.y }, t, { ...def, attack: def.counter }, def.fx, events, true);
+}
+
+/** Up to `n` tiles round a house or tower that a foot soldier could stand on: its own tile once the building is gone, then the eight about it. */
+function roomAround(s: GameState, c: CityBuilding, n: number, idx = new BoardIndex(s)): Pt[] {
+  const out: Pt[] = [];
+  const take = (x: number, y: number): void => {
+    if (out.length >= n || !isFree(idx, s, x, y, 'foot')) return;
+    out.push({ x, y });
+    // Taken, as far as the next one to look is concerned.
+    idx.ground.set(key(x, y), { id: -1 } as Unit);
+  };
+  if (!cityAt(s, c.x, c.y)) take(c.x, c.y);
+  for (const [dx, dy] of DIRS8) take(c.x + dx, c.y + dy);
+  return out;
+}
+
+/**
+ * Brings a house or tower's soldiers out into the open, each `hurt` the worse
+ * for it, and says where each came to stand. The building is left empty.
+ */
+function spill(s: GameState, c: CityBuilding, hurt: number, attacker: number, events: GameEvent[]): Extract<GameEvent, { type: 'leave' }> {
+  const idx = new BoardIndex(s);
+  const spots = roomAround(s, c, c.occupants.length, idx);
+  const out: Array<{ unitId: number; x: number; y: number }> = [];
+  c.occupants.forEach((id, i) => {
+    const found = unitById(s, id);
+    if (!found) return;
+    const { unit, owner } = found;
+    unit.hp -= hurt;
+    if (hurt > 0) events.push({ type: 'damage', target: { kind: 'unit', id }, amount: hurt, pos: { x: c.x, y: c.y } });
+    const gone = (): void => {
+      owner.units = owner.units.filter((u) => u.id !== id);
+    };
+    if (unit.hp <= 0) {
+      gone();
+      if (attacker >= 0) {
+        s.players[attacker].kills++;
+        award(s, attacker, SCORE_UNIT[unit.key], events);
+      }
+      return;
+    }
+    delete unit.inside;
+    // Round about, or the nearest clear ground anywhere if the crowd there leaves no room.
+    const at = spots[i] ?? nearestOpen(s, c, 'foot', idx);
+    if (!at) {
+      gone();
+      return;
+    }
+    unit.x = at.x;
+    unit.y = at.y;
+    idx.ground.set(key(at.x, at.y), unit);
+    out.push({ unitId: id, x: at.x, y: at.y });
+  });
+  c.occupants = [];
+  return { type: 'leave', city: c.id, units: out };
+}
+
+/** Why `u` cannot move into the house or tower `c`. */
+function entryError(s: GameState, u: Unit, c: CityBuilding): string {
+  if (!UNITS[u.key].garrison) return '该单位无法进驻建筑';
+  const holder = holderOf(s, c);
+  if (holder && holder.id !== u.owner) return `建筑里有${holder.name}的士兵，要先把它摧毁`;
+  if (c.occupants.length >= CITY[c.kind].room) return '建筑里已经满了';
+  return '无法到达该位置';
 }
 
 function whoName(s: GameState, attacker: number): string {
@@ -679,31 +1022,46 @@ function award(s: GameState, pid: number, points: number, events: GameEvent[]): 
 /**
  * An alien's bounty and its points go round in proportion to the damage each
  * player did, so whoever hurt it most earns the most; the last blow earns its
- * bonus on top.
+ * bonus on top. What was done to the shapes it came from counts as well
+ * (`carried`).
+ *
+ * A small giant with a brother still standing is not the end of 泽参: nothing
+ * is paid out yet, and what was done to it is handed on to whoever is left,
+ * to be paid for once the last of them has gone down.
  */
 function killAlien(s: GameState, id: number, hero: number, events: GameEvent[]): void {
   const alien = alienById(s, id);
   if (!alien) return;
-  const def = ALIENS[alien.key];
+  const card = ALIENS[alien.key];
+  const def = alienStats(alien);
   s.aliens = s.aliens.filter((a) => a.id !== id);
-  // Its spiders do not outlive it.
-  for (const b of s.brood.filter((x) => x.owner === id)) events.push({ type: 'destroyed', target: { kind: 'spider', id: b.id }, pos: { x: b.x, y: b.y } });
+  // Its small fry do not outlive it.
+  for (const b of s.brood.filter((x) => x.owner === id)) events.push({ type: 'destroyed', target: { kind: 'brood', id: b.id }, pos: { x: b.x, y: b.y } });
   s.brood = s.brood.filter((x) => x.owner !== id);
-  const total = Object.values(alien.hurt).reduce((n, v) => n + v, 0);
+  const hurt = addLedger(alien.carried ?? {}, alien.hurt);
+  // Pieces of one giant are told apart by the arrival they came with: there is never a second of a kind in the same one.
+  const kin = alien.form === 2 && card.splits ? s.aliens.filter((o) => o.key === alien.key && o.form === 2 && o.wave === alien.wave) : [];
+  if (kin.length) {
+    // Only what was done to this one itself moves across: every piece set out with the giant's toll, and has taken in each brother's as it fell.
+    for (const o of kin) o.carried = addLedger(o.carried ?? {}, alien.hurt);
+    addLog(s, `${def.name}被击碎，还有 ${kin.length} 只`, 'combat', hero >= 0 ? hero : undefined);
+    return;
+  }
+  const total = Object.values(hurt).reduce((n, v) => n + v, 0);
   const rewards: Record<number, Cost> = {};
   const points: Record<number, number> = {};
   const parts: string[] = [];
   for (const p of s.players) {
-    const share = total > 0 ? (alien.hurt[p.id] ?? 0) / total : 0;
+    const share = total > 0 ? (hurt[p.id] ?? 0) / total : 0;
     const r: Cost = {};
-    for (const k of Object.keys(def.reward) as ResourceKey[]) {
-      const v = Math.round((def.reward[k] ?? 0) * share);
+    for (const k of Object.keys(card.reward) as ResourceKey[]) {
+      const v = Math.round((card.reward[k] ?? 0) * share);
       if (v > 0) {
         r[k] = v;
         p.resources[k] += v;
       }
     }
-    const pts = Math.round(def.bounty * share) + (p.id === hero ? SCORE_LAST_HIT : 0);
+    const pts = Math.round(card.bounty * share) + (p.id === hero ? SCORE_LAST_HIT : 0);
     if (!pts && !Object.keys(r).length) continue;
     rewards[p.id] = r;
     points[p.id] = pts;
@@ -717,20 +1075,86 @@ function killAlien(s: GameState, id: number, hero: number, events: GameEvent[]):
   addLog(s, `${def.name}被击败！奖励按伤害分配：${parts.join('；') || '无人分得'}`, 'good', hero >= 0 ? hero : undefined);
 }
 
+/**
+ * 拓龙, struck down in its first shape, takes its second one where it stood:
+ * whole again, and flying now. What was done to the first shape is carried
+ * over, to be paid for once the second has gone down too.
+ */
+function morph(s: GameState, a: AlienState, events: GameEvent[]): void {
+  const first = alienStats(a);
+  const next = SECOND_FORMS[a.key]!;
+  a.carried = addLedger(a.carried ?? {}, a.hurt);
+  a.hurt = {};
+  a.form = 2;
+  // Whole again, as strong as its arrival makes it.
+  a.hp = alienStats(a).hp;
+  events.push({ type: 'morph', id: a.id, key: a.key, x: a.x, y: a.y });
+  addLog(s, `警报：${first.name}倒下了，却又化作${next.look}腾空而起！`, 'warn');
+}
+
+/**
+ * 泽参, struck down, breaks into as many small giants as there is room for on
+ * the free tiles round it, each carrying what was done to the giant. With
+ * nowhere for even one to stand it is simply dead, and false comes back so
+ * that the reward goes round at once.
+ */
+function splitAlien(s: GameState, a: AlienState, events: GameEvent[]): boolean {
+  const giant = alienStats(a);
+  const small = SECOND_FORMS[a.key]!;
+  const idx = new BoardIndex(s);
+  // Its own tile is about to be free, but the pieces come to stand round about, not where it stood.
+  const room: Pt[] = [];
+  for (const [dx, dy] of DIRS8) if (isFree(idx, s, a.x + dx, a.y + dy, 'foot', a.id)) room.push({ x: a.x + dx, y: a.y + dy });
+  if (!room.length) return false;
+  const at = { x: a.x, y: a.y };
+  s.aliens = s.aliens.filter((o) => o.id !== a.id);
+  const toll = addLedger(a.carried ?? {}, a.hurt);
+  const ids: number[] = [];
+  for (const spot of room.slice(0, giant.splits)) {
+    const piece: AlienState = { id: s.nextId++, key: a.key, x: spot.x, y: spot.y, hp: 0, arrived: a.arrived, wave: a.wave, hurt: {}, form: 2, carried: { ...toll } };
+    // As strong as the giant's arrival makes them.
+    piece.hp = alienStats(piece).hp;
+    s.aliens.push(piece);
+    ids.push(piece.id);
+  }
+  events.push({ type: 'destroyed', target: { kind: 'alien', id: a.id }, pos: at });
+  events.push({ type: 'split', from: a.id, key: a.key, ids });
+  addLog(s, `警报：${giant.name}碎成了 ${ids.length} 只${small.name}！`, 'warn');
+  return true;
+}
+
 function destroyTarget(s: GameState, t: Target, attacker: number, events: GameEvent[]): void {
-  events.push({ type: 'destroyed', target: t.ref, pos: t.pos });
   if (t.ref.kind === 'alien') {
+    // Down is not out for the hidden ones: 拓龙 rises again in its second shape, 泽参 breaks into pieces.
+    const def = alienStats(t.obj as AlienState);
+    if (def.changes) {
+      morph(s, t.obj as AlienState, events);
+      return;
+    }
+    if (def.splits && splitAlien(s, t.obj as AlienState, events)) return;
+    events.push({ type: 'destroyed', target: t.ref, pos: t.pos });
     killAlien(s, t.ref.id, attacker, events);
     return;
   }
-  if (t.ref.kind === 'spider') {
+  events.push({ type: 'destroyed', target: t.ref, pos: t.pos });
+  if (t.ref.kind === 'brood') {
+    const def = minionDef(t.obj as Minion);
     s.brood = s.brood.filter((b) => b.id !== t.ref.id);
     if (attacker >= 0) {
       const p = s.players[attacker];
-      for (const k of RES_KEYS) p.resources[k] += SPIDERLING.reward[k] ?? 0;
+      for (const k of RES_KEYS) p.resources[k] += def.reward[k] ?? 0;
       award(s, attacker, SCORE_SPIDER, events);
     }
-    addLog(s, `${whoName(s, attacker)} 消灭了${SPIDERLING.name}`, 'combat', attacker >= 0 ? attacker : undefined);
+    addLog(s, `${whoName(s, attacker)} 消灭了${def.name}`, 'combat', attacker >= 0 ? attacker : undefined);
+    return;
+  }
+  if (t.ref.kind === 'city') {
+    const fallen = t.obj as CityBuilding;
+    const holder = holderOf(s, fallen);
+    s.city = s.city.filter((c) => c.id !== fallen.id);
+    // Those inside are thrown out into the open, worse for it.
+    events.push(spill(s, fallen, CITY_CRUSH, attacker, events));
+    addLog(s, `${whoName(s, attacker)} 摧毁了${holder ? ` ${holder.name} 占领的` : ''}${t.name}`, 'combat', attacker >= 0 ? attacker : undefined);
     return;
   }
   const owner = s.players[t.owner];
@@ -765,17 +1189,8 @@ function retaliate(s: GameState, defenderId: number, attacker: { ref: EntityRef;
     const t = targetOf(s, attacker.ref);
     if (!t) return; // it already went down
     b.reacted = true;
-    events.push({
-      type: 'attack',
-      source: { kind: 'building', id: b.id },
-      target: t.ref,
-      from: pos,
-      to: t.pos,
-      shots: lv.shots,
-      style: bd.canHit.includes('air') ? 'flak' : 'shell',
-    });
     addLog(s, `${d.name} 的${lv.name}反击`, 'combat', d.id);
-    strike(s, d.id, t, { attack: lv.attack, shots: lv.shots, defense: 0, range: lv.range, canHit: bd.canHit }, events);
+    shoot(s, d.id, { kind: 'building', id: b.id }, pos, t, { attack: lv.attack, shots: lv.shots, defense: 0, range: lv.range, canHit: bd.canHit }, bd.canHit.includes('air') ? 'flak' : 'shell', events);
   }
 }
 
@@ -809,6 +1224,7 @@ function eliminate(s: GameState, p: PlayerState, events: GameEvent[]): void {
   p.alive = false;
   for (const u of p.units) events.push({ type: 'destroyed', target: { kind: 'unit', id: u.id }, pos: { x: u.x, y: u.y } });
   for (const b of p.buildings) events.push({ type: 'destroyed', target: { kind: 'building', id: b.id }, pos: buildingCenter(b) });
+  for (const c of s.city) c.occupants = c.occupants.filter((id) => !p.units.some((u) => u.id === id));
   p.units = [];
   p.buildings = [];
   p.ap = 0;
@@ -822,8 +1238,12 @@ function eliminate(s: GameState, p: PlayerState, events: GameEvent[]): void {
 // The aliens
 // ---------------------------------------------------------------------------
 
-/** What a creature strikes with. */
-type Creature = Pick<AlienDef, 'attack' | 'shots' | 'defense' | 'range' | 'fx'>;
+/**
+ * What a creature strikes with: its card, with how far it reaches against
+ * aircraft when that is shorter than against the ground, and whether it hovers
+ * (which tells the base guns which of them may answer it).
+ */
+type Creature = CombatStats & { move: number; fx: AttackStyle; airRange?: number; flies?: boolean };
 
 /** A free tile in the middle of the board, or anywhere at all if the middle is taken. */
 function landingSpot(s: GameState, rng: Rng, idx: BoardIndex, selfId: number): Pt | null {
@@ -840,13 +1260,25 @@ function landingSpot(s: GameState, rng: Rng, idx: BoardIndex, selfId: number): P
   return pool.length ? rng.pick(pool) : null;
 }
 
-/** One of the aliens that is not on the board already, drawn at random. A board with no room for it goes without. */
+/**
+ * One of the aliens that is not on the board already, drawn at random. A board
+ * with no room for it goes without.
+ *
+ * The hidden ones never open a match, and never come two at once; once the
+ * first alien is down from the sky each arrival has `HIDDEN_CHANCE` of being
+ * one of them, as strong as its place in the order of arrivals makes it.
+ */
 function spawnAlien(s: GameState, rng: Rng, events: GameEvent[]): void {
   const at = landingSpot(s, rng, new BoardIndex(s), 0);
   if (!at) return;
-  const pool = ALIEN_KEYS.filter((k) => !s.aliens.some((a) => a.key === k));
-  const k = rng.pick(pool.length ? pool : ALIEN_KEYS);
-  const alien: AlienState = { id: s.nextId++, key: k, x: at.x, y: at.y, hp: ALIENS[k].hp, arrived: s.turn, hurt: {} };
+  const here = (k: AlienKey): boolean => s.aliens.some((a) => a.key === k);
+  const hidden = HIDDEN_KEYS.filter((k) => !here(k));
+  const lurking = hidden.length > 0 && s.aliensSeen > 0 && !s.aliens.some((a) => isHidden(a.key)) && rng.chance(HIDDEN_CHANCE);
+  const known = ALIEN_KEYS.filter((k) => !here(k));
+  const k = lurking ? rng.pick(hidden) : rng.pick(known.length ? known : ALIEN_KEYS);
+  // Later arrivals are stronger than earlier ones: this one is the next in the match.
+  const alien: AlienState = { id: s.nextId++, key: k, x: at.x, y: at.y, hp: 0, arrived: s.turn, wave: s.aliensSeen + 1, hurt: {} };
+  alien.hp = alienStats(alien).hp;
   s.aliens.push(alien);
   s.aliensSeen++;
   events.push({ type: 'alienSpawn', id: alien.id, key: k, x: at.x, y: at.y });
@@ -885,32 +1317,47 @@ function everyAsset(s: GameState): Pt[] {
     for (const u of p.units) out.push({ x: u.x, y: u.y });
     for (const b of p.buildings) if (targetable(b)) out.push(...tilesOf(b));
   }
+  for (const c of s.city) if (holderOf(s, c)) out.push({ x: c.x, y: c.y });
   return out;
 }
 
-/** What the players have within `range` of `at`, the softest first: units before buildings, a base last of all. */
-function preyNear(s: GameState, at: Pt, range: number): Target[] {
+/**
+ * What the players have within reach of `at`, the softest first: units before
+ * buildings, a base last of all. Only what the creature can strike at all is
+ * on the list, and aircraft only as far as it reaches them.
+ */
+function preyNear(s: GameState, at: Pt, beast: Creature): Target[] {
   const opts: Array<{ t: Target; pri: number }> = [];
-  const take = (t: Target | null, pri: number): void => {
-    if (t) opts.push({ t, pri });
+  const reach = (t: Target): number => (t.cls === 'air' ? beast.airRange ?? beast.range : beast.range);
+  const take = (t: Target | null, pri: number, d: number): void => {
+    if (t && d <= reach(t) && beast.canHit.includes(t.cls)) opts.push({ t, pri });
   };
   for (const p of s.players) {
     if (!p.alive) continue;
-    for (const u of p.units) if (cheb(at, u) <= range) take(targetOf(s, { kind: 'unit', id: u.id }), u.hp);
+    for (const u of p.units) if (cheb(at, u) <= beast.range) take(targetOf(s, { kind: 'unit', id: u.id }), u.hp, cheb(at, u));
     for (const b of p.buildings) {
-      if (targetable(b) && distToBuilding(at, b) <= range) take(targetOf(s, { kind: 'building', id: b.id }), 1000 + (b.key === 'hq' ? 1000 : 0) + b.hp);
+      if (targetable(b) && distToBuilding(at, b) <= beast.range) take(targetOf(s, { kind: 'building', id: b.id }), 1000 + (b.key === 'hq' ? 1000 : 0) + b.hp, 0);
     }
+  }
+  // A house or tower someone holds is theirs too, as far as a creature is concerned.
+  for (const c of s.city) {
+    if (holderOf(s, c) && cheb(at, c) <= beast.range) take(targetOf(s, { kind: 'city', id: c.id }), 1000 + c.hp, 0);
   }
   return opts.sort((a, b) => a.pri - b.pri).map((o) => o.t);
 }
 
 /**
- * Walks a creature up to `move` tiles: towards `prey` when it has one and the
- * dice agree, otherwise to whichever tile it fancies. Aliens wade straight
- * through water; nothing about them plays by our rules.
+ * Walks a creature up to as many tiles as it has steps for: towards `prey`
+ * when it has one and the dice agree, otherwise to whichever tile it fancies.
+ * Aliens wade straight through water; nothing about them plays by our rules.
+ * One that hovers goes over everything, but still comes to rest only where
+ * nothing else stands: it holds a tile like any of them.
  */
-function creep(s: GameState, idx: BoardIndex, who: AlienState | Spiderling, move: number, prey: Pt | null, chase: number, rng: Rng, events: GameEvent[]): void {
-  const reach = reachable(idx, s, who, 'track', move, who.id);
+function creep(s: GameState, idx: BoardIndex, who: AlienState | Minion, beast: Creature, prey: Pt | null, chase: number, rng: Rng, events: GameEvent[]): void {
+  const reach = reachable(idx, s, who, beast.flies ? 'air' : 'track', beast.move, who.id);
+  if (beast.flies) {
+    for (const [k] of reach) if (idx.ground.has(k) || idx.blocked.has(k) || idx.city.has(k)) reach.delete(k);
+  }
   let dest: Pt | null = null;
   if (prey && rng.chance(chase)) {
     let bestD = Infinity;
@@ -979,7 +1426,7 @@ function hatch(s: GameState, rng: Rng, queen: AlienState, range: readonly [numbe
   const ids: number[] = [];
   for (let n = Math.min(rng.int(range[0], range[1]), room, around.length); n > 0; n--) {
     const at = around.splice(rng.int(0, around.length - 1), 1)[0];
-    const spider: Spiderling = { id: s.nextId++, owner: queen.id, x: at.x, y: at.y, hp: SPIDERLING.hp };
+    const spider: Minion = { id: s.nextId++, kind: 'spider', owner: queen.id, x: at.x, y: at.y, hp: SPIDERLING.hp };
     s.brood.push(spider);
     ids.push(spider.id);
   }
@@ -989,26 +1436,99 @@ function hatch(s: GameState, rng: Rng, queen: AlienState, range: readonly [numbe
   }
 }
 
-/** Strikes the first thing on the list, and lets the base guns answer if it was one of theirs. */
+/** Strikes the first thing on the list with what the creature has, and lets the base guns answer if it was one of theirs. */
 function bite(s: GameState, ref: EntityRef, prey: Target[], beast: Creature, at: Pt, events: GameEvent[]): void {
   if (!prey.length) return;
   const t = prey[0];
   const from = { x: at.x, y: at.y };
-  events.push({ type: 'attack', source: ref, target: t.ref, from, to: t.pos, shots: beast.shots, style: beast.fx });
-  strike(s, -1, t, { attack: beast.attack, shots: beast.shots, defense: beast.defense, range: beast.range, canHit: ['ground', 'air', 'building'] }, events);
-  // Base guns answer an attack on the base; the alien is not a unit, but they can still see it.
-  if (t.ref.kind === 'building' && s.players[t.owner].alive) retaliate(s, t.owner, { ref, pos: from, cls: 'ground' }, events);
+  shoot(s, -1, ref, from, t, beast, beast.fx, events);
+  // Base guns answer an attack on the base; the alien is not a unit, but they can still see it, and only those that reach its kind.
+  if (t.ref.kind === 'building' && s.players[t.owner].alive) retaliate(s, t.owner, { ref, pos: from, cls: beast.flies ? 'air' : 'ground' }, events);
+}
+
+/**
+ * Whether an alien's energy is due to go this round: every so many rounds
+ * from the one after it arrived, so that whatever stands near has a round
+ * to get clear.
+ */
+const burstDue = (s: GameState, a: AlienState, every: number): boolean => s.turn > a.arrived && (s.turn - a.arrived) % every === 0;
+
+/**
+ * 雅千 lets her energy go: everything of the players' on the tiles round her,
+ * wings included, takes the burst's power before its own defence, and so does
+ * every building with a tile in reach. A foot soldier it kills gets up again
+ * at once as one of her skeletons, for as long as she has room for more. The
+ * guns of a base she has caught answer, as they answer any attack on it.
+ */
+function burst(s: GameState, a: AlienState, def: AlienDef, events: GameEvent[]): void {
+  const ref: EntityRef = { kind: 'alien', id: a.id };
+  const idx = new BoardIndex(s);
+  const hits: SplashHit[] = [];
+  const struck = new Set<number>();
+  const raised: number[] = [];
+  const strike = (t: Target): void => {
+    const dmg = netDamage(def.burst!.power, t.defense);
+    const victim = t.obj as Unit;
+    // A soldier that falls to it gets up again as hers, on the tile it is leaving this instant.
+    const rise = t.ref.kind === 'unit' && dmg >= victim.hp && UNITS[victim.key].family === 'soldier' && s.brood.filter((b) => b.owner === a.id).length < BROOD_CAP;
+    applyDamage(s, -1, t, dmg, events);
+    hits.push({ target: t.ref, amount: dmg, pos: t.pos });
+    if (t.ref.kind === 'building') struck.add(t.owner);
+    if (rise) {
+      const bone: Minion = { id: s.nextId++, kind: 'skeleton', owner: a.id, x: victim.x, y: victim.y, hp: SKELETON.hp };
+      s.brood.push(bone);
+      raised.push(bone.id);
+    }
+  };
+  const seen = new Set<number>();
+  for (let dy = -def.burst!.reach; dy <= def.burst!.reach; dy++) {
+    for (let dx = -def.burst!.reach; dx <= def.burst!.reach; dx++) {
+      // Not her own tile: nothing of the players' can be standing under her.
+      if ((!dx && !dy) || !inBoard(a.x + dx, a.y + dy, s.boardSize)) continue;
+      const x = a.x + dx;
+      const y = a.y + dy;
+      const k = key(x, y);
+      const u = idx.air.get(k) ?? idx.ground.get(k);
+      if (u) {
+        const t = targetOf(s, { kind: 'unit', id: u.id });
+        if (t) strike(t);
+        continue;
+      }
+      const house = idx.city.get(k);
+      if (house && holderOf(s, house)) {
+        const t = targetOf(s, { kind: 'city', id: house.id });
+        if (t) strike(t);
+        continue;
+      }
+      const b = s.players.flatMap((p) => p.buildings).find((q) => q.w > 0 && x >= q.x && x < q.x + q.w && y >= q.y && y < q.y + q.h);
+      if (!b || seen.has(b.id)) continue;
+      seen.add(b.id);
+      const t = targetOf(s, { kind: 'building', id: b.id });
+      if (t) strike(t);
+    }
+  }
+  events.push({ type: 'burst', source: ref, at: { x: a.x, y: a.y }, hits });
+  if (raised.length) events.push({ type: 'raise', owner: a.id, ids: raised });
+  for (const owner of struck) if (s.players[owner].alive) retaliate(s, owner, { ref, pos: { x: a.x, y: a.y }, cls: def.flies ? 'air' : 'ground' }, events);
+  addLog(s, `警报：${def.name}释放了能量，周围 ${hits.length} 处目标受到波及${raised.length ? `，${raised.length} 名士兵化作了${SKELETON.name}` : ''}`, 'warn');
 }
 
 /** One alien's go. Each kind goes about it in its own way. */
 function alienTurn(s: GameState, rng: Rng, a: AlienState, events: GameEvent[]): void {
-  if (s.phase === 'gameover') return;
-  const def = ALIENS[a.key];
+  // Asked through a function: the guns that answer an alien may end the match half-way through its go.
+  const over = (): boolean => s.phase === 'gameover';
+  if (over()) return;
+  // What it strikes with is its own: a later arrival hits harder and takes more killing, and a shape-changer strikes as the shape it is in.
+  const def = alienStats(a);
   const ref: EntityRef = { kind: 'alien', id: a.id };
   const idx = new BoardIndex(s);
   const home: Pt = { x: a.x, y: a.y };
+  // Every so many rounds the goddess lets her energy go first of all, from wherever she is.
+  if (def.burst && burstDue(s, a, def.burst.every)) burst(s, a, def, events);
+  // A gun that answered may have been the end of her, or of somebody's base.
+  if (over() || !alienById(s, a.id)) return;
   // Anything with a long reach fires from where it stands; something that bites has to walk up first.
-  let prey: Target[] = def.range > 1 ? preyNear(s, home, def.range) : [];
+  let prey: Target[] = def.range > 1 ? preyNear(s, home, def) : [];
   if (def.teleports) {
     // It turns up wherever it can reach something, and nowhere in particular when it cannot.
     const den = ambushSpot(s, rng, idx, a, def.range) ?? landingSpot(s, rng, idx, a.id);
@@ -1017,10 +1537,10 @@ function alienTurn(s: GameState, rng: Rng, a: AlienState, events: GameEvent[]): 
       a.x = den.x;
       a.y = den.y;
     }
-    prey = preyNear(s, a, def.range);
+    prey = preyNear(s, a, def);
   } else if (!prey.length) {
-    creep(s, idx, a, def.move, nearestAsset(s, home), 0.7, rng, events);
-    prey = preyNear(s, a, def.range);
+    creep(s, idx, a, def, nearestAsset(s, home), 0.7, rng, events);
+    prey = preyNear(s, a, def);
   }
   if (prey.length) {
     bite(s, ref, prey, def, a, events);
@@ -1037,18 +1557,22 @@ function alienTurn(s: GameState, rng: Rng, a: AlienState, events: GameEvent[]): 
   if (def.brood && alienById(s, a.id)) hatch(s, rng, a, def.brood, events);
 }
 
-/** A small spider makes for whatever took its fancy, then bites whatever it comes across. */
-function spiderTurn(s: GameState, rng: Rng, spider: Spiderling, events: GameEvent[]): void {
+/**
+ * One of the aliens' small fry makes for whatever took its fancy, then bites
+ * whatever it comes across.
+ */
+function minionTurn(s: GameState, rng: Rng, minion: Minion, events: GameEvent[]): void {
   if (s.phase === 'gameover') return;
-  const ref: EntityRef = { kind: 'spider', id: spider.id };
-  let prey = preyNear(s, spider, SPIDERLING.range);
+  const def = minionDef(minion);
+  const ref: EntityRef = { kind: 'brood', id: minion.id };
+  let prey = preyNear(s, minion, def);
   if (!prey.length) {
     const goal = rng.pick(everyAsset(s));
-    if (goal) creep(s, new BoardIndex(s), spider, SPIDERLING.move, goal, 1, rng, events);
-    prey = preyNear(s, spider, SPIDERLING.range);
+    if (goal) creep(s, new BoardIndex(s), minion, def, goal, 1, rng, events);
+    prey = preyNear(s, minion, def);
   }
   // It attacks at random: whatever is in reach, not the softest.
-  if (prey.length) bite(s, ref, [rng.pick(prey)], SPIDERLING, spider, events);
+  if (prey.length) bite(s, ref, [rng.pick(prey)], def, minion, events);
 }
 
 /** The aliens' go, right after the dice: each in turn, then the spiders. They never turn on one another. */
@@ -1056,7 +1580,7 @@ function aliensTurn(s: GameState, rng: Rng, events: GameEvent[]): void {
   // Each gun answers the aliens once this round, whoever it belongs to and whoever they strike.
   for (const p of s.players) for (const b of p.buildings) b.reacted = false;
   for (const a of [...s.aliens]) alienTurn(s, rng, a, events);
-  for (const b of [...s.brood]) spiderTurn(s, rng, b, events);
+  for (const b of [...s.brood]) minionTurn(s, rng, b, events);
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,11 +1640,7 @@ export function reduce(s: GameState, a: Action): Result {
         s.phase = 'dice';
         events.push({ type: 'dice', turn: s.turn, dice });
         const n = (id: number): string => s.players[id].name;
-        addLog(
-          s,
-          `第 ${s.turn} 回合掷骰：${dice.map((d) => `${n(d.player)} ${d.rolls[0]} 点`).join('，')}。${n(dice[0].player)} +3 行动点，${n(dice[dice.length - 1].player)} +1 行动点`,
-          'info',
-        );
+        addLog(s, `第 ${s.turn} 回合掷骰：${dice.map((d) => `${n(d.player)} ${d.rolls[0]} 点`).join('，')}。${dice.filter((d) => d.ap > 0).map((d) => `${n(d.player)} +${d.ap} 行动点`).join('，')}`, 'info');
         // A new alien every few rounds, as long as the board is not holding two already.
         if (s.turn >= s.nextAlien) {
           if (s.aliens.length < ALIEN_CAP) spawnAlien(s, rng, events);
@@ -1228,6 +1748,24 @@ export function reduce(s: GameState, a: Action): Result {
       }
       break;
     }
+    case 'PROMOTE': {
+      const p = cur();
+      if (!inTurn) bad('现在不能升级');
+      else {
+        const err = canPromote(p, a.unitId);
+        if (err) bad(err);
+        else {
+          const u = p.units.find((x) => x.id === a.unitId)!;
+          pay(p, promoteCost(u.key, rankOf(u)));
+          u.rank = rankOf(u) + 1;
+          // Raised a rank, and whole again at the new one, whatever it had lost before.
+          u.hp = maxHpOf(u);
+          events.push({ type: 'promote', player: p.id, unitId: u.id, rank: u.rank });
+          addLog(s, `${p.name} 的${UNITS[u.key].name}晋升为${RANKS[u.rank - 1].name}`, 'good', p.id);
+        }
+      }
+      break;
+    }
     case 'PRODUCE': {
       const p = cur();
       if (!inTurn) bad('现在不能生产');
@@ -1265,13 +1803,36 @@ export function reduce(s: GameState, a: Action): Result {
       if (!u) bad('找不到该单位');
       else if (u.moveUsed) bad('该单位本回合已经移动过');
       else {
-        const path = reachable(new BoardIndex(s), s, u, moveModeOf(u.key), UNITS[u.key].move, u.id).get(key(a.x, a.y));
-        if (!path) bad('无法到达该位置');
+        const house = cityAt(s, a.x, a.y);
+        const path = reachable(new BoardIndex(s), s, u, moveModeOf(u.key), UNITS[u.key].move, u.id, u).get(key(a.x, a.y));
+        if (!path) bad(house ? entryError(s, u, house) : '无法到达该位置');
         else {
           u.x = a.x;
           u.y = a.y;
           u.moveUsed = true;
           events.push({ type: 'move', unitId: u.id, path });
+          // A soldier that walks into a house or tower is inside it from then on: off the board, and shooting no further than its windows allow.
+          if (house) {
+            u.inside = house.id;
+            house.occupants.push(u.id);
+            events.push({ type: 'garrison', city: house.id, unitId: u.id });
+            addLog(s, `${p.name} 的${UNITS[u.key].name}进驻了${CITY[house.kind].name}`, 'good', p.id);
+          }
+        }
+      }
+      break;
+    }
+    case 'LEAVE': {
+      const p = cur();
+      const house = inTurn ? cityById(s, a.cityId) : null;
+      if (!house) bad('现在不能解散');
+      else {
+        const mine = house.occupants.map((id) => unitById(s, id)).filter((hit): hit is { unit: Unit; owner: PlayerState } => !!hit && hit.owner.id === p.id);
+        if (!mine.length) bad('里面没有你的士兵');
+        else if (roomAround(s, house, mine.length).length < mine.length) bad('附近有其他单位无法解散');
+        else {
+          addLog(s, `${p.name} 解散了${CITY[house.kind].name}里的士兵`, 'info', p.id);
+          events.push(spill(s, house, 0, -1, events));
         }
       }
       break;
@@ -1294,10 +1855,17 @@ export function reduce(s: GameState, a: Action): Result {
         } else {
           if (srcUnit) srcUnit.attackUsed = true;
           else p.buildings.find((x) => x.id === src.ref.id)!.fired = true;
-          events.push({ type: 'attack', source: src.ref, target: t.ref, from: src.pos, to: t.pos, shots: src.stats.shots, style: src.fx });
-          strike(s, p.id, t, src.stats, events);
-          if (t.ref.kind === 'building' && srcUnit) {
-            retaliate(s, t.owner, { ref: { kind: 'unit', id: srcUnit.id }, pos: src.pos, cls: UNITS[srcUnit.key].unitClass }, events);
+          const shot = shoot(s, p.id, src.ref, src.pos, t, src.stats, src.fx, events);
+          // Base guns answer a unit that struck one of their base's buildings, by a splash that reached one as much as by a shot aimed at it.
+          if (srcUnit) {
+            const struck = new Set<number>();
+            if (shot.target.kind === 'building') struck.add(t.owner);
+            for (const h of shot.splash ?? []) {
+              if (h.target.kind !== 'building') continue;
+              const b = buildingById(s, h.target.id);
+              if (b) struck.add(b.owner.id);
+            }
+            for (const owner of struck) retaliate(s, owner, { ref: { kind: 'unit', id: srcUnit.id }, pos: src.pos, cls: UNITS[srcUnit.key].unitClass }, events);
           }
         }
       }

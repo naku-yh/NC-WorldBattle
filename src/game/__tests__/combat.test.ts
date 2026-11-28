@@ -27,7 +27,7 @@ describe('伤害公式', () => {
     const laser = spawn(s, 0, 'laserTank', 9, 9);
     const beast = spawn(s, 1, 'apocalypse', 9, 10);
     atk(s, laser, unit(beast.id));
-    expect(beast.hp).toBe(40 - (10 + 2)); // a tank in the open, armour notwithstanding
+    expect(beast.hp).toBe(40 - (12 + 2)); // a tank in the open, armour notwithstanding
   });
 
   it('多管武器每发单独计算', () => {
@@ -36,8 +36,8 @@ describe('伤害公式', () => {
     const twin = spawn(s, 0, 'twinTank', 9, 9);
     const tank = spawn(s, 1, 'tank', 9, 10);
     atk(s, twin, unit(tank.id));
-    // Two shells of (7 + 2) against (3 − 2) armour: tanks in the open hit harder and are thinner.
-    expect(tank.hp).toBe(15 - 2 * 8);
+    // Two shells of (5 + 2) against (3 − 2) armour: tanks in the open hit harder and are thinner.
+    expect(tank.hp).toBe(15 - 2 * 6);
   });
 });
 
@@ -51,7 +51,7 @@ describe('单位对战', () => {
     atk(s, inf, unit(tank.id));
     expect(tank.hp).toBe(15 - 2); // 3 − (3 − 2)
     atk(s, at, unit(tank.id));
-    expect(tank.hp).toBe(15 - 2 - 6);
+    expect(tank.hp).toBe(15 - 2 - 7); // 4, twice over against a tank, less armour of 3 − 2
     expect(tryApply(s, { type: 'ATTACK', source: unit(at.id), target: unit(tank.id) })).toContain('已经攻击');
   });
 
@@ -63,19 +63,19 @@ describe('单位对战', () => {
     const events = atk(s, tank, unit(inf.id));
     expect(s.players[1].units).toHaveLength(0);
     expect(p.kills).toBe(1);
-    expect(p.damageDealt).toBe(10); // 8 + 2 for fighting in the open
+    expect(p.damageDealt).toBe(9); // 8 + 2 for fighting in the open, less the soldier's 1
     expect(events.some((e) => e.type === 'destroyed' && e.target.id === inf.id)).toBe(true);
   });
 
-  it('狙击手射程 4，打不到 5 格外的目标', () => {
+  it('狙击手射程 6、对步兵双倍伤害，打不到 7 格外的目标', () => {
     const s = newGame();
     toTurn(s);
     const near = spawn(s, 0, 'sniper', 8, 8);
     const far = spawn(s, 0, 'sniper', 7, 8);
     const a = spawn(s, 1, 'infantry', 8, 12);
-    const b = spawn(s, 1, 'infantry', 8, 13);
+    const b = spawn(s, 1, 'infantry', 8, 15);
     atk(s, near, unit(a.id));
-    expect(a.hp).toBe(1);
+    expect(a.hp).toBe(6 - (5 * 2 - 1)); // 5 against a soldier's 1, twice over
     expect(tryApply(s, { type: 'ATTACK', source: unit(far.id), target: unit(b.id) })).toBe('目标超出射程');
   });
 
@@ -116,7 +116,7 @@ describe('空中单位', () => {
     const aaGun = placeBuilding(s, s.players[0], 'aaGun', 5, 5);
     const jetA = spawn(s, 1, 'fighter', 8, 7);
     const jetB = spawn(s, 1, 'fighter', 7, 7);
-    const foot = spawn(s, 1, 'infantry', 7, 6);
+    const foot = spawn(s, 1, 'infantry', 7, 5); // out of the infantry's reach, inside the anti-air tank's
 
     expect(attackTargets(s, unit(inf.id))).toEqual([]);
     expect(tryApply(s, { type: 'ATTACK', source: unit(inf.id), target: unit(jetA.id) })).toBe('只有防空武器能攻击空中单位');
@@ -147,7 +147,7 @@ describe('空中单位', () => {
 
     // Against the ground the anti-air tank is no stronger than its attack of 5.
     atk(s, aaTank, unit(foot.id));
-    expect(foot.hp).toBe(6 - (5 + 2));
+    expect(foot.hp).toBe(6 - ((5 + 2) - 1));
 
     // The Apocalypse reaches aircraft too: two shells of 4, so 8 for the turn, against armour of 2.
     atk(s, beast, unit(jet.id));
@@ -156,12 +156,12 @@ describe('空中单位', () => {
 
   it('卡片上的攻击是每回合每一炮的合计', () => {
     expect(volley(UNITS.tank)).toBe(8);
-    expect(volley(UNITS.twinTank)).toBe(14);
+    expect(volley(UNITS.twinTank)).toBe(10);
     expect(volley(UNITS.apocalypse)).toBe(18);
     const s = newGame();
     toTurn(s);
     for (const k of ['tank', 'twinTank', 'aaTank', 'missileTank', 'laserTank', 'apocalypse'] as const) spawn(s, 0, k, 9, 9);
-    expect(attackPower(s.players[0])).toBe(8 + 14 + 5 + 15 + 10 + 18);
+    expect(attackPower(s.players[0])).toBe(8 + 10 + 5 + 14 + 12 + 18);
   });
 
   it('战斗机可以攻击地面单位和建筑', () => {
@@ -398,16 +398,16 @@ describe('外星人克洛伊', () => {
     const p1 = s.players[1];
     const beast: EntityRef = { kind: 'alien', id: chloe.id };
 
-    // Player 0: anti-tank 6 (armour-piercing) + sniper 1 = 7.
-    atk(s, spawn(s, 0, 'atSoldier', 9, 10), beast);
+    // Player 0: tank 6 (8 + 2 in the open, against armour of 4) + sniper 1 = 7.
+    atk(s, spawn(s, 0, 'tank', 9, 10), beast);
     atk(s, spawn(s, 0, 'sniper', 8, 8), beast);
-    expect(chloe.hp).toBe(90 - 7);
+    expect(chloe.hp).toBe(135 - 7);
 
     // Player 1: apocalypse 14 (two shells of 9 + 2 against armour of 4) + sniper 1 = 15, then the finishing tank shot.
     toTurn(s, 1);
     atk(s, spawn(s, 1, 'apocalypse', 10, 10), beast);
     atk(s, spawn(s, 1, 'sniper', 10, 9), beast);
-    expect(chloe.hp).toBe(90 - 22);
+    expect(chloe.hp).toBe(135 - 22);
     chloe.hp = 1;
     const ore0 = p0.resources.ore;
     const ore1 = p1.resources.ore;
@@ -429,5 +429,127 @@ describe('外星人克洛伊', () => {
       { type: 'score', player: 0, amount: 100 },
       { type: 'score', player: 1, amount: 400 },
     ]);
+  });
+});
+
+describe('十字溅射', () => {
+  it('导弹坦克：目标吃满，上下左右四格的敌人各吃一半，斜角和身后的不受影响，自己人不受影响', () => {
+    const s = newGame();
+    toTurn(s);
+    const missile = spawn(s, 0, 'missileTank', 5, 9);
+    const centre = spawn(s, 1, 'apocalypse', 9, 9);
+    const right = spawn(s, 1, 'apocalypse', 10, 9);
+    const up = spawn(s, 1, 'infantry', 9, 8);
+    const down = spawn(s, 1, 'apocalypse', 9, 10);
+    const corner = spawn(s, 1, 'apocalypse', 10, 10);
+    const behind = spawn(s, 1, 'apocalypse', 9, 7);
+    const mine = spawn(s, 0, 'apocalypse', 8, 9);
+    const jet = spawn(s, 1, 'fighter', 9, 8); // wings are above the blast
+    const events = atk(s, missile, unit(centre.id));
+    // The missile tank fights from the open: 14 + 2 against armour of 5 − 2; the splash is half of that attack, less armour.
+    expect(centre.hp).toBe(40 - (16 - 3));
+    expect(right.hp).toBe(40 - (8 - 3));
+    expect(down.hp).toBe(40 - (8 - 3));
+    expect(s.players[1].units.some((u) => u.id === up.id)).toBe(false); // 6 life against 8 − 1
+    expect(corner.hp).toBe(40);
+    expect(behind.hp).toBe(40);
+    expect(mine.hp).toBe(40);
+    expect(jet.hp).toBe(12);
+    const shot = events.find((e) => e.type === 'attack');
+    expect(shot && shot.type === 'attack' ? shot.splash?.map((h) => h.target.id).sort() : []).toEqual([right.id, down.id, up.id].sort());
+    expect(events.filter((e) => e.type === 'damage').map((e) => (e.type === 'damage' ? e.target.id : 0)).sort()).toEqual([centre.id, right.id, down.id, up.id].sort());
+  });
+
+  it('轰炸机：空中单位、只对地，十字溅射同样是一半', () => {
+    const s = newGame();
+    toTurn(s);
+    const bomber = spawn(s, 0, 'bomber', 9, 7);
+    const centre = spawn(s, 1, 'apocalypse', 9, 8);
+    const side = spawn(s, 1, 'apocalypse', 10, 8);
+    const jet = spawn(s, 1, 'fighter', 9, 8);
+    expect(UNITS.bomber).toMatchObject({ hp: 20, attack: 16, defense: 3, range: 1, move: 4, cost: { ore: 800, oil: 1500 }, unitClass: 'air' });
+    // Range 1: both tanks beside it are in reach, the fighter is not.
+    expect(attackTargets(s, unit(bomber.id)).map((t) => t.id)).toEqual([centre.id, side.id]);
+    expect(tryApply(s, { type: 'ATTACK', source: unit(bomber.id), target: unit(jet.id) })).toBe('只有防空武器能攻击空中单位');
+    atk(s, bomber, unit(centre.id));
+    expect(centre.hp).toBe(40 - (16 - 3));
+    expect(side.hp).toBe(40 - (8 - 3));
+    expect(jet.hp).toBe(12);
+  });
+
+  it('溅射波及基地建筑时，对方的炮台照样反击', () => {
+    const s = newGame();
+    toTurn(s);
+    const missile = spawn(s, 0, 'missileTank', 9, 9);
+    const quarry = spawn(s, 1, 'infantry', 12, 9);
+    const gun = placeBuilding(s, s.players[1], 'turret', 13, 9);
+    const events = atk(s, missile, unit(quarry.id));
+    // The infantry beside the gun takes the shot; the gun takes the splash, and answers.
+    expect(gun.hp).toBe(30 - 8);
+    expect(missile.hp).toBe(15 - (8 - (2 - 2)));
+    expect(events.some((e) => e.type === 'attack' && e.source.kind === 'building')).toBe(true);
+  });
+});
+
+describe('双倍伤害', () => {
+  it('狙击手对步兵类翻倍，对坦克不翻倍', () => {
+    const s = newGame();
+    toTurn(s);
+    const sniper = spawn(s, 0, 'sniper', 8, 8);
+    const foot = spawn(s, 1, 'infantry', 8, 11);
+    atk(s, sniper, unit(foot.id));
+    expect(foot.hp).toBe(6 - (10 - 1));
+    toTurn(s, 0);
+    const tank = spawn(s, 1, 'tank', 8, 11);
+    atk(s, spawn(s, 0, 'sniper', 8, 8), unit(tank.id));
+    expect(tank.hp).toBe(15 - (5 - 1));
+  });
+
+  it('反坦克战士对坦克类翻倍（人形机甲也算坦克类），对士兵不翻倍', () => {
+    const s = newGame();
+    toTurn(s);
+    const at = spawn(s, 0, 'atSoldier', 8, 8);
+    const mech = spawn(s, 1, 'mech', 8, 10);
+    atk(s, at, unit(mech.id));
+    expect(mech.hp).toBe(30 - (8 - (6 - 2)));
+    toTurn(s, 0);
+    const foot = spawn(s, 1, 'infantry', 8, 10);
+    atk(s, spawn(s, 0, 'atSoldier', 8, 8), unit(foot.id));
+    expect(foot.hp).toBe(6 - (4 - 1));
+  });
+
+  it('特种部队对外星人翻倍；对普通单位不翻倍', () => {
+    const s = newGame();
+    toTurn(s);
+    const ops = spawn(s, 0, 'specOps', 8, 8);
+    const beast = dropAlien(s, 'chloe', 8, 11);
+    atk(s, ops, { kind: 'alien', id: beast.id });
+    expect(beast.hp).toBe(135 - (16 - 4));
+    atk(s, spawn(s, 0, 'specOps', 8, 8), unit(spawn(s, 1, 'tank', 8, 11).id));
+    expect(s.players[1].units[0].hp).toBe(15 - (8 - 1));
+  });
+});
+
+describe('新数值', () => {
+  it('运输车 100 矿石 / 50 石油；天启双塔坦克另加 150 肉；双管坦克一回合 10、激光坦克 12、导弹坦克 14', () => {
+    expect(UNITS.truck.cost).toEqual({ ore: 100, oil: 50 });
+    expect(UNITS.apocalypse.cost).toEqual({ ore: 2200, oil: 1300, meat: 150 });
+    expect(UNITS.missileTank).toMatchObject({ attack: 14, shots: 1, splash: 'cross' });
+    expect(UNITS.laserTank).toMatchObject({ attack: 12, shots: 1, pierce: true });
+    expect(UNITS.twinTank).toMatchObject({ attack: 5, shots: 2 });
+    expect(volley(UNITS.twinTank)).toBe(10);
+  });
+
+  it('军营的单位与要求一致', () => {
+    expect(UNITS.infantry).toMatchObject({ cost: { ore: 100, meat: 100 }, hp: 6, attack: 3, defense: 1, range: 2, move: 3, garrison: true });
+    expect(UNITS.sniper).toMatchObject({ cost: { ore: 280, oil: 50, meat: 150 }, hp: 5, attack: 5, doubleVs: ['soldier'], defense: 1, range: 6, move: 3, garrison: true });
+    expect(UNITS.atSoldier).toMatchObject({ cost: { ore: 400, oil: 200, meat: 150 }, hp: 6, attack: 4, doubleVs: ['tank'], defense: 1, range: 3, move: 3, garrison: true });
+    expect(UNITS.atSoldier.pierce).toBeUndefined();
+    expect(UNITS.specOps).toMatchObject({ name: '特种部队', cost: { ore: 600, oil: 300, meat: 200 }, hp: 15, attack: 8, doubleVs: ['alien'], defense: 4, range: 4, move: 4, producedBy: 'barracks' });
+    expect(UNITS.specOps.garrison).toBeUndefined();
+    expect(UNITS.mech).toMatchObject({ name: '人形机甲', cost: { ore: 2300, oil: 1100, meat: 300 }, hp: 30, attack: 13, defense: 6, range: 3, move: 4, producedBy: 'barracks', canHit: ['ground', 'air', 'building'] });
+    expect(UNITS.mech.garrison).toBeUndefined();
+    expect(UNITS.bomber.producedBy).toBe('airport');
+    expect(UNITS.bomber.canHit).toEqual(['ground', 'building']);
   });
 });

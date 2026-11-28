@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BUILDINGS, HARVEST_YIELD, START_RESOURCES, UNITS } from '../data';
-import { canProduce, countBuilding, netDefense } from '../engine';
+import { canProduce, countBuilding, createGame, netDefense } from '../engine';
 import { apply, build, newGame, nextTurn, rich, toTurn, tryApply } from './helpers';
 
 describe('开局', () => {
@@ -10,8 +10,19 @@ describe('开局', () => {
       expect(p.buildings.map((b) => b.key)).toEqual(['hq', 'factory']);
       expect(p.buildings[0].hp).toBe(20);
       expect(p.trucks).toBe(1);
-      expect(p.resources).toEqual(START_RESOURCES);
+      expect(p.resources).toEqual(START_RESOURCES.high);
     }
+  });
+
+  it('难度决定开局资源，对电脑玩家一样：低 500/500/500，高 300/250/250', () => {
+    expect(START_RESOURCES.low).toEqual({ ore: 500, oil: 500, meat: 500 });
+    expect(START_RESOURCES.high).toEqual({ ore: 300, oil: 250, meat: 250 });
+    const low = createGame({ seats: ['human', 'ai'], totalTurns: 20, difficulty: 'low' });
+    expect(low.difficulty).toBe('low');
+    for (const p of low.players) expect(p.resources).toEqual({ ore: 500, oil: 500, meat: 500 });
+    const high = createGame({ seats: ['human', 'ai'], totalTurns: 20 });
+    expect(high.difficulty).toBe('high');
+    for (const p of high.players) expect(p.resources).toEqual({ ore: 300, oil: 250, meat: 250 });
   });
 
   it('开局工厂没有电力，不能生产运输车', () => {
@@ -30,12 +41,12 @@ describe('采集（行动点）', () => {
     p.ap = 3;
     p.trucks = 1;
     apply(s, { type: 'HARVEST', resource: 'ore' });
-    expect(p.resources.ore).toBe(START_RESOURCES.ore + HARVEST_YIELD);
+    expect(p.resources.ore).toBe(START_RESOURCES.high.ore + HARVEST_YIELD);
     expect(p.ap).toBe(2);
 
     p.trucks = 4;
     apply(s, { type: 'HARVEST', resource: 'oil' });
-    expect(p.resources.oil).toBe(START_RESOURCES.oil + 4 * HARVEST_YIELD);
+    expect(p.resources.oil).toBe(START_RESOURCES.high.oil + 4 * HARVEST_YIELD);
     expect(p.ap).toBe(1);
   });
 

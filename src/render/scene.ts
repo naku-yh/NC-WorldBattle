@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { isMusterLocal, isReservedLocal, laneTiles, terrainAt, toLocal, toWorld, zoneSize } from '../game/board';
 import type { GameState, Pt } from '../game/types';
-import { DEPOT_COLOR, LANE_COLOR, TERRAIN_COLORS } from './palette';
+import { DEPOT_COLOR, LANE_COLOR, TERRAIN_COLORS, WATER } from './palette';
 import { TerrainDecor, noise } from './terrain';
+import { WaterShape, flooded } from './water';
 
 export { worldOf } from './coords';
 
@@ -12,20 +13,41 @@ export const HIGHLIGHT = { move: 0x60a5fa, attack: 0xef4444, spawn: 0xfbbf24, bu
 /** Highlights sit a hair above the board, and above the bridge decks too. */
 const MARK_Y = 0.075;
 
-/** Light streaks on a stretch of water, under the sheet of water drawn over them. */
-function waves(g: CanvasRenderingContext2D, x0: number, y0: number, px: number, x: number, y: number): void {
-  g.strokeStyle = 'rgba(200,232,255,0.2)';
-  g.lineWidth = 3;
-  g.lineCap = 'round';
-  for (let i = 0; i < 3; i++) {
-    const ox = x0 + 10 + noise(x, y, i, 20) * (px - 46);
-    const oy = y0 + 12 + noise(x, y, i, 21) * (px - 26);
-    g.beginPath();
-    g.moveTo(ox, oy);
-    g.quadraticCurveTo(ox + 9, oy - 6, ox + 18, oy);
-    g.quadraticCurveTo(ox + 27, oy + 6, ox + 34, oy);
-    g.stroke();
+/** How many pixels of the water's mask go to a tile: only its outline matters, so it need not be fine. */
+const MASK_PX = 24;
+
+/**
+ * The water of the map as one body: a soft shade cast out from its banks,
+ * then the water itself, in the smooth shape that the sheet laid over it takes
+ * too (see `water.ts`). Everything else about the water is that sheet's.
+ */
+function paintWater(g: CanvasRenderingContext2D, s: GameState): void {
+  const { pieces } = new WaterShape(s);
+  if (!pieces.length) return;
+  const side = s.boardSize * MASK_PX;
+  const mask = document.createElement('canvas');
+  mask.width = mask.height = side;
+  const m = mask.getContext('2d')!;
+  m.fillStyle = '#fff';
+  for (const { outline } of pieces) {
+    m.beginPath();
+    outline.forEach(([x, y], i) => (i ? m.lineTo(x * MASK_PX, (s.boardSize - y) * MASK_PX) : m.moveTo(x * MASK_PX, (s.boardSize - y) * MASK_PX)));
+    m.closePath();
+    m.fill();
   }
+  // The shade is the mask's own shadow. The mask is drawn two canvas widths off to the left, and its shadow as far to the right,
+  // so the shadow lands here and nothing of the mask itself does.
+  const wide = g.canvas.width;
+  g.save();
+  g.shadowColor = 'rgba(8,24,20,0.55)';
+  g.shadowBlur = wide / 40;
+  g.shadowOffsetX = wide * 2;
+  g.drawImage(mask, -wide * 2, 0, wide, g.canvas.height);
+  g.restore();
+  m.globalCompositeOperation = 'source-in';
+  m.fillStyle = WATER;
+  m.fillRect(0, 0, side, side);
+  g.drawImage(mask, 0, 0, g.canvas.width, g.canvas.height);
 }
 
 /** A soft patch of colour laid over a tile, for grain: a darker patch, a sunnier one, a wet one. */
@@ -89,22 +111,11 @@ function drawBoard(s: GameState): HTMLCanvasElement {
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
       const t = terrainAt(s, x, y);
-      const col = TERRAIN_COLORS[t];
+      // Water is painted afterwards as one smooth shape. Its tiles start out as lawn: that is what shows along the banks and in the rounded corners.
+      const col = TERRAIN_COLORS[flooded(s, x, y) ? 'plain' : t];
       g.fillStyle = (x + y) % 2 === 0 ? col.a : col.b;
       g.fillRect(X(x), Y(y), px, px);
-      if (t === 'water' || t === 'lake') {
-        // Deeper in the middle of the tile; the sheet of water over it does the rest.
-        grain(g, x, y, X(x), Y(y), px, ['rgba(3,18,44,0.3)', 'rgba(3,18,44,0.2)']);
-        waves(g, X(x), Y(y), px, x, y);
-      } else if (t === 'bridge') {
-        // Planks run along the waterway; the deck is laid across it.
-        g.fillStyle = 'rgba(60,34,12,0.45)';
-        for (let i = 0; i < 6; i++) {
-          const o = px * 0.22 + i * (px * 0.11);
-          if (s.waterway === 'vertical') g.fillRect(X(x) + o, Y(y) + px * 0.2, 4, px * 0.6);
-          else g.fillRect(X(x) + px * 0.2, Y(y) + o, px * 0.6, 4);
-        }
-      } else if (t === 'forest') {
+      if (t === 'forest') {
         // A dark floor under the trees, with what light gets through it.
         grain(g, x, y, X(x), Y(y), px, ['rgba(8,32,14,0.34)', 'rgba(8,32,14,0.26)', 'rgba(170,214,120,0.12)']);
         g.fillStyle = 'rgba(12,40,18,0.35)';
@@ -128,6 +139,7 @@ function drawBoard(s: GameState): HTMLCanvasElement {
     g.fillStyle = Math.random() < 0.6 ? 'rgba(20,50,20,0.16)' : 'rgba(255,255,190,0.08)';
     g.fillRect(Math.random() * c.width, Math.random() * c.height, 2 + Math.random() * 4, 1 + Math.random() * 2);
   }
+  paintWater(g, s);
 
   for (const p of s.players) {
     const c0 = s.corners[p.corner];

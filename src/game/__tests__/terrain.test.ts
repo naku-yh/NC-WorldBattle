@@ -235,10 +235,10 @@ describe('地形加成', () => {
 
   it('平原：坦克攻击 +2，防御 −2', () => {
     expect(TERRAIN.plain.effects.tank).toEqual({ attack: 2, defense: -2 });
-    // A tank in the open hits a soldier for 8 + 2; plain ground does nothing for the soldier.
-    expect(duel('plain', 'tank', 'plain', 'infantry')).toBe(10);
-    // Soldiers neither gain nor lose on plain ground: 3 − 0 either way.
-    expect(duel('plain', 'infantry', 'plain', 'infantry')).toBe(3);
+    // A tank in the open hits a soldier for 8 + 2, less the soldier's 1; plain ground does nothing for the soldier.
+    expect(duel('plain', 'tank', 'plain', 'infantry')).toBe(9);
+    // Soldiers neither gain nor lose on plain ground: 3 − 1 either way.
+    expect(duel('plain', 'infantry', 'plain', 'infantry')).toBe(2);
     // Tank against tank in the open: (8 + 2) − (3 − 2) = 9.
     expect(duel('plain', 'tank', 'plain', 'tank')).toBe(9);
     // The attacker in a wood and the target on a hill: neither changes a tank's attack or defence. 8 − 3.
@@ -247,17 +247,17 @@ describe('地形加成', () => {
 
   it('山地：士兵攻击 +2，防御 +1', () => {
     expect(TERRAIN.hill.effects.soldier).toEqual({ attack: 2, defense: 1 });
-    // Infantry on a hill: 3 + 2 against a soldier on flat ground.
-    expect(duel('hill', 'infantry', 'plain', 'infantry')).toBe(5);
-    // Infantry on a hill is harder to hurt: 8 − (0 + 1).
-    expect(duel('forest', 'tank', 'hill', 'infantry')).toBe(7);
+    // Infantry on a hill: 3 + 2 against a soldier's 1 on flat ground.
+    expect(duel('hill', 'infantry', 'plain', 'infantry')).toBe(4);
+    // Infantry on a hill is harder to hurt: 8 − (1 + 1).
+    expect(duel('forest', 'tank', 'hill', 'infantry')).toBe(6);
   });
 
   it('树林：士兵防御 +2，坦克类射程 −2', () => {
     expect(TERRAIN.forest.effects.soldier).toEqual({ defense: 2 });
     expect(TERRAIN.forest.effects.tank).toEqual({ range: -2 });
-    // A soldier among the trees takes 8 − (0 + 2) from a tank.
-    expect(duel('forest', 'tank', 'forest', 'infantry')).toBe(6);
+    // A soldier among the trees takes 8 − (1 + 2) from a tank.
+    expect(duel('forest', 'tank', 'forest', 'infantry')).toBe(5);
   });
 
   it('坦克在树林里射程缩短，查询与实际开火一致', () => {
@@ -267,7 +267,7 @@ describe('地形加成', () => {
     const missile = spawn(s, 0, 'missileTank', 9, 9);
     const near = spawn(s, 0, 'tank', 8, 8);
     setTerrain(s, 8, 8, 'forest');
-    expect(statsOf(s, missile)).toMatchObject({ attack: 15, range: 3, defense: 2 });
+    expect(statsOf(s, missile)).toMatchObject({ attack: 14, range: 3, defense: 2 });
     // A weapon always reaches the next tile over, however deep the wood.
     expect(statsOf(s, near).range).toBe(1);
     const far = spawn(s, 1, 'infantry', 9, 13); // 4 tiles away: too far from inside the wood
@@ -288,11 +288,11 @@ describe('地形加成', () => {
     setTerrain(s, 9, 9, 'bridge');
     expect(statsOf(s, tank)).toMatchObject({ attack: 8, defense: 3 });
     const foot = spawn(s, 0, 'infantry', 8, 8);
-    expect(defenseOf(s, foot)).toBe(0);
-    setTerrain(s, 8, 8, 'hill');
     expect(defenseOf(s, foot)).toBe(1);
-    setTerrain(s, 8, 8, 'forest');
+    setTerrain(s, 8, 8, 'hill');
     expect(defenseOf(s, foot)).toBe(2);
+    setTerrain(s, 8, 8, 'forest');
+    expect(defenseOf(s, foot)).toBe(3);
   });
 
   it('飞机不受地形影响', () => {
@@ -443,8 +443,14 @@ describe('自选位置建造', () => {
 });
 
 describe('地图大小', () => {
-  it('中型 20×20，大型 25×25（格子数 +56%，保持正方形）', () => {
-    expect(MAP_SIZES.map((m) => m.size)).toEqual([20, 25]);
+  it('中型 20×20，大型 25×25（格子数 +56%），超大型 35×35，都是正方形', () => {
+    expect(MAP_SIZES.map((m) => m.size)).toEqual([20, 25, 35]);
+    expect(MAP_SIZES.map((m) => m.name)).toEqual(['中型', '大型', '超大型']);
+    const huge = newGame(['human', 'human'], 1, 20, { size: 35, terrain: 'random' });
+    expect(huge.boardSize).toBe(35);
+    expect(huge.terrain).toHaveLength(35 * 35);
+    expect(huge.corners.map((c) => c.ox)).toEqual([0, 34, 0, 34]);
+    expect(huge.players[1].buildings[0]).toMatchObject({ x: 33, y: 33 });
     expect((25 * 25) / (20 * 20)).toBeGreaterThan(1.5);
     const s = newGame(['human', 'human'], 1, 20, { size: 25, terrain: 'random' });
     expect(s.boardSize).toBe(25);

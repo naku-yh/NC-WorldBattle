@@ -1,10 +1,10 @@
-import { ALIEN_EVERY, MAP_SIZES, MAX_BOARD, MIN_BOARD } from '../game/data';
-import type { GameState, Phase, Terrain } from '../game/types';
+import { ALIEN_EVERY, HIDDEN_KEYS, ALIEN_KEYS, MAP_SIZES, MAX_BOARD, MIN_BOARD, RANKS } from '../game/data';
+import type { AlienKey, Difficulty, GameState, MinionKind, Phase, Terrain } from '../game/types';
 
 /** How many matches can be kept at once. */
 export const SAVE_SLOTS = 3;
 /** Bumped whenever GameState changes in a way old files cannot survive; such files are then refused. */
-const VERSION = 3;
+const VERSION = 5;
 const PREFIX = 'nc-worldbattle.save.';
 
 /** Everything a match needs to pick up where it left off. The state is plain data, so it stores as JSON. */
@@ -63,8 +63,11 @@ const TERRAINS: readonly Terrain[] = ['plain', 'hill', 'forest', 'water', 'lake'
 const PHASES: readonly Phase[] = ['roundStart', 'dice', 'aliens', 'player', 'gameover'];
 const STATE_KEYS = [
   'rng', 'nextId', 'boardSize', 'corners', 'terrain', 'waterway', 'totalTurns', 'turn', 'phase', 'currentPlayer', 'order', 'orderIndex',
-  'alienActed', 'dice', 'players', 'nodes', 'aliens', 'brood', 'nextAlien', 'aliensSeen', 'log', 'logId', 'ranking', 'gameOverReason',
+  'alienActed', 'dice', 'players', 'nodes', 'aliens', 'brood', 'nextAlien', 'aliensSeen', 'city', 'difficulty', 'log', 'logId', 'ranking', 'gameOverReason',
 ] as const;
+const DIFFICULTIES: readonly Difficulty[] = ['low', 'high'];
+const BEASTS: readonly AlienKey[] = [...ALIEN_KEYS, ...HIDDEN_KEYS];
+const FRY: readonly MinionKind[] = ['spider', 'skeleton'];
 const PLAYER_KEYS = [
   'id', 'name', 'kind', 'color', 'alive', 'corner', 'resources', 'ap', 'trucks', 'buildings', 'units', 'powerCap', 'powerUsed',
   'producedThisTurn', 'score', 'damageDealt', 'kills',
@@ -74,13 +77,29 @@ const PLAYER_KEYS = [
 function looksLikeSave(x: unknown): x is SaveFile {
   if (!isObj(x) || x.v !== VERSION || typeof x.savedAt !== 'number' || !isObj(x.state)) return false;
   const s = x.state;
-  if (!has(s, STATE_KEYS) || !isList(s.aliens) || !isList(s.brood)) return false;
+  if (!has(s, STATE_KEYS) || !isList(s.aliens) || !isList(s.brood) || !isList(s.city)) return false;
+  if (typeof s.difficulty !== 'string' || !DIFFICULTIES.includes(s.difficulty as Difficulty)) return false;
   const n = s.boardSize;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < MIN_BOARD || n > MAX_BOARD) return false;
   if (!isList(s.terrain) || s.terrain.length !== n * n || !s.terrain.every((t) => TERRAINS.includes(t as Terrain))) return false;
   if (typeof s.phase !== 'string' || !PHASES.includes(s.phase as Phase)) return false;
   if (!isList(s.players) || s.players.length < 2 || s.players.length > 4) return false;
-  return s.players.every((p) => isObj(p) && has(p, PLAYER_KEYS) && isList(p.units) && isList(p.buildings));
+  if (!s.players.every((p) => isObj(p) && has(p, PLAYER_KEYS) && isList(p.units) && isList(p.buildings))) return false;
+  // Every alien says which arrival it was, and is one the game knows. Which shape it is in and what toll it carries are optional (both came later than the fifth version), but never anything else than what they should be.
+  const aliens = s.aliens as unknown[];
+  const beasts = aliens.every(
+    (a) =>
+      isObj(a) &&
+      typeof a.wave === 'number' &&
+      BEASTS.includes(a.key as AlienKey) &&
+      (a.form === undefined || a.form === 1 || a.form === 2) &&
+      (a.carried === undefined || (isObj(a.carried) && Object.values(a.carried).every((n) => typeof n === 'number'))),
+  );
+  // Small fry that say what they are, say one of the two things they can be.
+  const fry = (s.brood as unknown[]).every((b) => !isObj(b) || b.kind === undefined || FRY.includes(b.kind as MinionKind));
+  // A unit's rank, where it has one, is one of the ranks there are.
+  const ranked = (s.players as unknown[]).every((p) => !isObj(p) || (p.units as unknown[]).every((u) => !isObj(u) || u.rank === undefined || (typeof u.rank === 'number' && Number.isInteger(u.rank) && u.rank >= 1 && u.rank <= RANKS.length)));
+  return beasts && fry && ranked;
 }
 
 /** The save in `raw`, or null if it is missing or unreadable. Each older version is brought forward one step at a time. */
@@ -90,6 +109,8 @@ export function decodeSave(raw: string | null): SaveFile | null {
     let data: unknown = JSON.parse(raw);
     if (isObj(data) && data.v === 1 && isObj(data.state)) data = fromFirstVersion(data as unknown as { savedAt: number; state: StateV1 });
     if (isObj(data) && data.v === 2 && isObj(data.state)) data = fromSecondVersion(data as unknown as { savedAt: number; state: GameState });
+    if (isObj(data) && data.v === 3 && isObj(data.state)) data = fromThirdVersion(data as unknown as { savedAt: number; state: GameState });
+    if (isObj(data) && data.v === 4 && isObj(data.state)) data = fromFourthVersion(data as unknown as { savedAt: number; state: GameState });
     return looksLikeSave(data) ? data : null;
   } catch {
     return null;
@@ -202,7 +223,29 @@ function fromSecondVersion(file: { savedAt: number; state: GameState }): SaveFil
   for (const p of file.state.players) {
     for (const b of p.buildings) if (b.key === 'defenseNet' && b.level === 2) b.level = OLD_NET_TOP;
   }
-  return { v: VERSION, savedAt: file.savedAt, state: file.state };
+  // Written as the third version, so it goes through that version's step too.
+  return { v: 3, savedAt: file.savedAt, state: file.state };
+}
+
+/**
+ * Before the fourth version there were no houses and towers on the map and
+ * no difficulty. Such a match goes on without any buildings to move into, and
+ * as the gentler game: its computer players were never the sharper ones.
+ */
+function fromThirdVersion(file: { savedAt: number; state: GameState }): SaveFile {
+  // Written as the fourth version, so it goes through that version's step too.
+  return { v: 4, savedAt: file.savedAt, state: { ...file.state, city: [], difficulty: 'low' } };
+}
+
+/**
+ * Before the fifth version every alien of a kind was as strong as the next,
+ * and they had half again less life. Such a match goes on with each alien
+ * counted as the first of its kind to arrive, and with the life it had left
+ * scaled up to the new figures, so that it is as far from dying as it was.
+ */
+function fromFourthVersion(file: { savedAt: number; state: GameState }): SaveFile {
+  const aliens = file.state.aliens.map((a) => ({ ...a, wave: 1, hp: Math.round(a.hp * 1.5) }));
+  return { v: VERSION, savedAt: file.savedAt, state: { ...file.state, aliens } };
 }
 
 // ---------------------------------------------------------------------------

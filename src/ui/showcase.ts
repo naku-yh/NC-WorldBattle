@@ -37,7 +37,7 @@ export function diorama(seed: number, seats: ('human' | 'ai')[]): GameState {
   // All five aliens stand in no-man's-land, the spider queen with a few of her brood.
   const half = Math.floor(s.boardSize / 2);
   const dens = openGround(s, { x: half, y: half }, ALIEN_KEYS.length);
-  s.aliens = ALIEN_KEYS.flatMap((key, i) => (dens[i] ? [{ id: s.nextId++, key, x: dens[i].x, y: dens[i].y, hp: ALIENS[key].hp, arrived: 6, hurt: {} }] : []));
+  s.aliens = ALIEN_KEYS.flatMap((key, i) => (dens[i] ? [{ id: s.nextId++, key, x: dens[i].x, y: dens[i].y, hp: ALIENS[key].hp, arrived: 6, wave: 1, hurt: {} }] : []));
   const queen = s.aliens.find((a) => a.key === 'kuide');
   if (queen) {
     for (const den of openGround(s, queen, 3).slice(1)) {

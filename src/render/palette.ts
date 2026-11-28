@@ -10,6 +10,9 @@ export const TERRAIN_COLORS: Record<Terrain, { a: string; b: string; mini: strin
   bridge: { a: '#8a5a2b', b: '#94622f', mini: '#d9a441' },
 };
 
+/** The water itself, under the sheet that shimmers over it. */
+export const WATER = '#1c4e7f';
+
 /** Supply lanes trucks drive on. */
 export const LANE_COLOR = 'rgba(164,138,98,0.88)';
 export const DEPOT_COLOR = 'rgba(128,136,148,0.92)';

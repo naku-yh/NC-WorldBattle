@@ -1,15 +1,16 @@
-import { ALIENS, BUILDABLE, BUILDINGS, HARVEST_YIELD, PRODUCED_UNITS, RESOURCES, SCORE_LAST_HIT, SCORE_SPIDER, SPIDERLING, TERRAIN, TRUCKS_PER_FACTORY, UNITS } from '../game/data';
-import { alienById, attackPower, buildingById, canBuild, canProduce, canStillAct, canUpgrade, countBuilding, hqOf, netDefense, nextLevelOf, spiderById, statsOf, unitById, volley } from '../game/engine';
-import { terrainAt, zoneSize } from '../game/board';
+import { ALIENS, ALIEN_GROWTH, BUILDABLE, BUILDINGS, CITY, CITY_RANGE, HARVEST_YIELD, PRODUCED_UNITS, RANKS, RESOURCES, SCORE_LAST_HIT, SCORE_SPIDER, TERRAIN, TRUCKS_PER_FACTORY, UNITS, isHidden } from '../game/data';
+import { alienById, alienStats, attackPower, buildingById, canBuild, canProduce, canStillAct, canUpgrade, cityById, countBuilding, hqOf, minionDef, netDefense, nextLevelOf, minionById, rankOf, rankStats, statsOf, unitById, volley } from '../game/engine';
+import { cityAt, holderOf, terrainAt, zoneSize } from '../game/board';
 import type { BuildingKey, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Resources, TerrainDef, TerrainEffect, Unit, UnitFamily, UnitKey } from '../game/types';
 import { fmt, h, touchOnly } from './dom';
-import { alienIcon, buildingIcon, glyph, icon, iconBox, spiderIcon, terrainIcon, unitIcon, type IconName } from './icons';
+import { ROOM, cardMeter, health, meterEl, metersEl, points, signed, type Meter } from './meters';
+import { alienIcon, buildingIcon, cityIcon, glyph, icon, iconBox, rankIcon, skeletonIcon, spiderIcon, terrainIcon, unitIcon, type IconName } from './icons';
 import { attackNotes, costText, effectOf } from './rules';
 
 /** The sidebar's pages. Gathering and the rulebook have left it: gathering has a panel of its own, the rules live in the pause menu. */
 export type Tab = 'build' | 'produce' | 'structures';
 export interface Sel {
-  kind: 'unit' | 'building';
+  kind: 'unit' | 'building' | 'city';
   id: number;
 }
 export interface HudCtx {
@@ -23,6 +24,8 @@ export interface HudCtx {
   placing: BuildingKey | null;
   /** A finger has tapped a tile for the building being placed and is one more tap away from building it there. */
   aimed: boolean;
+  /** Of the soldiers in the selected building, the one whose turn it is to fire. */
+  gunner: number | null;
   /** A producer of the player's own that is being looked at: its line on the "生产" page is lit, and scrolled to the first time. */
   focusProducer: BuildingKey | null;
   /** Only on the render that follows the click: after that the page keeps the place the player scrolled to. */
@@ -44,6 +47,12 @@ export interface HudActions {
   overview(): void;
   toggleSpeed(): void;
   cancelPlace(): void;
+  /** Brings the current player's soldiers out of the building they hold. */
+  leave(cityId: number): void;
+  /** Opens the step up to the next rank for one of the current player's units. */
+  promote(unitId: number): void;
+  /** Chooses which soldier in the selected building fires next. */
+  pick(unitId: number): void;
 }
 
 const TABS: Array<[Tab, string]> = [
@@ -72,67 +81,10 @@ function stat(label: string, text: string): HTMLElement {
   return h('span', { class: 'stat-chip' }, h('i', {}, label), text);
 }
 
-/** "+2" or "−2". */
-const signed = (n: number): string => (n > 0 ? `+${n}` : `−${Math.abs(n)}`);
-
-/** How many cells each figure's row has: the most it reaches on any unit or alien, so that every row of a kind is as long as every other and two cards line up. */
-const ROOM = { health: 12, attack: 18, defense: 10, range: 6, move: 8 };
-
-/** One figure of a card: a row of cells, then the number. */
-interface Meter {
-  label: string;
-  /** The figure off the reference card. */
-  base: number;
-  /** The figure as it stands. */
-  value: number;
-  room: number;
-  /** The number written after the cells. */
-  text: string;
-  /** For the pointer: where the difference from the reference card comes from. */
-  note?: string;
-  /** Health is a share of a whole rather than a count of points: its cells show how full it is. */
-  share?: true;
-}
-
-/**
- * A figure counted in points. The cells up to the reference card are the unit's own;
- * anything the ground adds on top of that carries on after them in another colour, and
- * anything the ground takes off is left as a gap where it would have been.
- */
-function points(label: string, base: number, value: number, room: number, suffix = '', shown?: string): Meter {
-  const text = shown ?? `${value}${suffix}${base === value ? '' : `(${signed(value - base)})`}`;
-  return { label, base, value, room, text, ...(base === value || shown ? {} : { note: `${label} ${base}，地形 ${signed(value - base)}` }) };
-}
-
-/** Health, as a row of cells filled to the share of it that is left. */
-function health(hp: number, max: number): Meter {
-  return { label: '生命', base: max, value: hp, room: ROOM.health, text: `${hp}/${max}`, share: true };
-}
-
-/** A figure of a unit's card on the "生产" page, where nothing has happened to the unit yet: its cells, then the figure in square brackets. */
-function cardMeter(label: string, value: number, room: number, share = false): Meter {
-  return { label, base: value, value, room, text: `[${value}]`, ...(share ? { share: true } : {}) };
-}
-
-/** A figure as it is drawn: its cells, then its number. */
-function meterEl(m: Meter): HTMLElement {
-  const cells = h('span', { class: 'cells' });
-  // Health has no whole number of cells to show: fill as many as the share left comes to, never none while there is any left.
-  const filled = m.share ? Math.max(m.value > 0 ? 1 : 0, Math.round((m.value / m.base) * m.room)) : m.value;
-  for (let i = 1; i <= m.room; i++) {
-    let kind = 'void';
-    if (m.share) kind = i > filled ? 'off' : `hp${m.value / m.base > 0.55 ? '' : m.value / m.base > 0.28 ? ' warn' : ' low'}`;
-    else if (i <= m.value) kind = i > m.base ? 'up' : '';
-    else if (i <= m.base) kind = 'down';
-    cells.append(h('i', { class: kind }));
-  }
-  return h('div', { class: 'meter', title: m.note ?? '' }, h('span', { class: 'mlabel' }, m.label), cells, h('b', { class: 'mvalue' }, m.text));
-}
-
-/** The figures of one card, a row at a time: two to a row, so that life sits over defence and attack over range. */
-function metersEl(rows: Meter[][]): HTMLElement {
-  const single = rows.length === 1 || rows[0].length === 1;
-  return h('div', { class: single ? 'meters one' : 'meters' }, ...rows.flat().map(meterEl));
+/** The rank a unit holds, with its insignia: the first thing said about it, after what it can still do this turn. */
+function rankTag(rank: number): HTMLElement {
+  // Not `rank` on its own: that is the results table's class, and it wants the whole width.
+  return h('span', { class: 'tag rank-tag', title: `军衔：${RANKS[rank - 1].name}` }, h('span', { class: 'rank-tag-ico', html: rankIcon(rank) }), RANKS[rank - 1].name);
 }
 
 /** What the name of a unit does not say: how its attack comes, and what else it can do. */
@@ -204,8 +156,13 @@ function describeTile(s: GameState, t: Pt): Described {
       if (b.w > 0 && t.x >= b.x && t.x < b.x + b.w && t.y >= b.y && t.y < b.y + b.h) here.push(`${p.name} 的${BUILDINGS[b.key].levels[b.level - 1].name}`);
     }
   }
-  for (const a of s.aliens) if (a.x === t.x && a.y === t.y) here.push(`外星人${ALIENS[a.key].name}`);
-  if (s.brood.some((b) => b.x === t.x && b.y === t.y)) here.push(SPIDERLING.name);
+  const house = cityAt(s, t.x, t.y);
+  if (house) {
+    const owner = holderOf(s, house);
+    here.push(`${CITY[house.kind].name}（${owner ? `${owner.name} 占领` : '无人占据'}）`);
+  }
+  for (const a of s.aliens) if (a.x === t.x && a.y === t.y) here.push(`外星人${alienStats(a).name}`);
+  for (const b of s.brood) if (b.x === t.x && b.y === t.y) here.push(minionDef(b).name);
   return {
     color: owner?.color ?? '#cbd5e1',
     title: `地块 (${t.x}, ${t.y}) · ${ground.name}`,
@@ -217,39 +174,45 @@ function describeTile(s: GameState, t: Pt): Described {
   };
 }
 
-/** One of the aliens, or one of the small spiders. */
+/** One of the aliens, or one of their small fry. What it says of a hidden one stops short of all of it, as the rulebook does. */
 function describeBeast(s: GameState, ref: EntityRef): Described | null {
-  if (ref.kind === 'spider') {
-    if (!spiderById(s, ref.id)) return null;
+  if (ref.kind === 'brood') {
+    const b = minionById(s, ref.id);
+    if (!b) return null;
+    const d = minionDef(b);
+    const bone = b.kind === 'skeleton';
     return {
-      color: '#e879f9',
-      title: `外星人 ${SPIDERLING.name}`,
-      art: spiderIcon(),
-      tags: [h('span', { class: 'tag warn' }, `${ALIENS.kuide.name}孵化的`)],
+      color: bone ? '#e7e5d8' : '#e879f9',
+      title: `外星人 ${d.name}`,
+      art: bone ? skeletonIcon() : spiderIcon(),
+      tags: [h('span', { class: 'tag warn' }, bone ? `${ALIENS.yaqian.name}唤起的` : `${ALIENS.kuide.name}孵化的`)],
       meters: [
-        [health(SPIDERLING.hp, SPIDERLING.hp), points('攻击', SPIDERLING.attack, SPIDERLING.attack, ROOM.attack)],
-        [points('防御', SPIDERLING.defense, SPIDERLING.defense, ROOM.defense)],
+        [health(d.hp, d.hp), points('攻击', volley(d), volley(d), ROOM.attack)],
+        [points('防御', d.defense, d.defense, ROOM.defense)],
       ],
-      stats: [],
+      stats: [stat('射程', String(d.range)), stat('移动', String(d.move))],
       terrain: null,
       help: `会随机攻击够得着的目标。踩死它得 ${SCORE_SPIDER} 积分和一点资源。`,
     };
   }
   const a = alienById(s, ref.id);
   if (!a) return null;
-  const d = ALIENS[a.key];
+  // Its own figures, not the reference card's: each alien to arrive is stronger than the last, and a hidden one stands in the shape it is in.
+  const d = alienStats(a);
+  const grown = Math.round(((a.wave ?? 1) - 1) * ALIEN_GROWTH * 100);
   return {
     color: d.color,
     title: `外星人 ${d.name} · ${d.look}`,
     art: alienIcon(a.key),
-    tags: [h('span', { class: 'tag warn' }, `第 ${a.arrived} 回合降临`)],
+    tags: [h('span', { class: 'tag warn' }, `第 ${a.arrived} 回合降临`), ...(grown ? [h('span', { class: 'tag warn' }, `第 ${a.wave} 个降临 · 生命、攻击、防御 +${grown}%`)] : [])],
     meters: [
       [health(a.hp, d.hp), points('攻击', volley(d), volley(d), ROOM.attack)],
       [points('防御', d.defense, d.defense, ROOM.defense), points('射程', d.range, d.range, ROOM.range)],
     ],
     stats: [stat('移动', d.teleports ? '瞬移' : String(d.move))],
     terrain: null,
-    help: `${d.desc} 击败可得 ${costText(d.reward)}；积分 ${d.bounty} 按伤害分配，最后一击另加 ${SCORE_LAST_HIT}。`,
+    // Where the figures it grew from are written down, when they are: a second shape's are in no rulebook.
+    help: `${d.desc} 击败可得 ${costText(d.reward)}；积分 ${d.bounty} 按伤害分配，最后一击另加 ${SCORE_LAST_HIT}。${grown && !(isHidden(a.key) && a.form === 2) ? '（基础数值见玩法说明）' : ''}`,
   };
 }
 
@@ -265,14 +228,19 @@ function ordersLeft(u: Unit): string {
 }
 
 function describe(s: GameState, ref: EntityRef, mine: boolean, humanTurn = false): Described | null {
-  if (ref.kind === 'alien' || ref.kind === 'spider') return describeBeast(s, ref);
+  if (ref.kind === 'alien' || ref.kind === 'brood') return describeBeast(s, ref);
   if (ref.kind === 'unit') {
     const hit = unitById(s, ref.id);
     if (!hit) return null;
     const d = UNITS[hit.unit.key];
     const st = statsOf(s, hit.unit);
     const ground = TERRAIN[terrainAt(s, hit.unit.x, hit.unit.y)];
-    const tags: HTMLElement[] = [];
+    const tags: HTMLElement[] = [rankTag(rankOf(hit.unit))];
+    // What it has at its rank off the card, before the ground has its say.
+    const grown = rankStats(hit.unit.key, rankOf(hit.unit));
+    // On a ranked unit the difference from the card is the rank's doing as much as the ground's, so the pointer is told both.
+    const whence = (label: string, card: number, byRank: number, now: number): string | undefined =>
+      rankOf(hit.unit) === 1 ? undefined : `${label} 卡面 ${card}，${RANKS[rankOf(hit.unit) - 1].name} ${signed(byRank - card)}，地形 ${signed(now - byRank)}`;
     // One of the player's own units that has nothing left this turn is never selected, only looked at: the grey one says so itself.
     const spent = humanTurn && !mine && d.attack > 0 && hit.owner.id === s.currentPlayer && !canStillAct(hit.unit);
     if (mine || spent) {
@@ -285,18 +253,39 @@ function describe(s: GameState, ref: EntityRef, mine: boolean, humanTurn = false
       art: unitIcon(hit.unit.key),
       // What it can still do this turn comes first; what it is comes after.
       tags: [...tags, ...unitTags(hit.unit.key)],
-      // The attack is what the unit puts out in a turn, every shell of it; what the ground adds is added to each shell.
+      // The attack is what the unit puts out in a turn, every shell of it; what the rank and then the ground add are added to each shell.
       meters:
         d.attack > 0
           ? [
-              [health(hit.unit.hp, d.hp), points('攻击', volley(d), volley(st), ROOM.attack)],
-              [points('防御', d.defense, st.defense, ROOM.defense), points('射程', d.range, st.range, ROOM.range)],
+              [health(hit.unit.hp, grown.hp), points('攻击', volley(d), volley(st), ROOM.attack, '', undefined, whence('攻击', volley(d), grown.attack * d.shots, volley(st)))],
+              [points('防御', d.defense, st.defense, ROOM.defense, '', undefined, whence('防御', d.defense, grown.defense, st.defense)), points('射程', d.range, st.range, ROOM.range)],
             ]
           : undefined,
       stats: d.attack > 0 ? [] : [stat('作用', '每台每次采集 100 资源')],
       terrain: h('span', { class: 'terrain', title: ground.rule }, `地形 ${groundText(ground, d.family)}`),
       // The help names only what is on the board to be clicked: a unit that has already moved has no blue tiles.
       help: (mine || spent) && d.attack > 0 ? ordersLeft(hit.unit) : '',
+    };
+  }
+  if (ref.kind === 'city') {
+    const c = cityById(s, ref.id);
+    if (!c) return null;
+    const d = CITY[c.kind];
+    const holder = holderOf(s, c);
+    const mine = c.occupants.some((id) => unitById(s, id)?.owner.id === s.currentPlayer) && s.phase === 'player';
+    return {
+      color: holder?.color ?? '#cbd5e1',
+      title: `${d.name}${holder ? ` · ${holder.name}` : ''}`,
+      art: cityIcon(c.kind),
+      tags: [holder ? h('span', { class: 'tag good', style: `color:${holder.color}` }, '已占领') : h('span', { class: 'tag' }, '无人占据')],
+      meters: [[health(c.hp, d.hp), points('防御', d.defense, d.defense, ROOM.defense)]],
+      stats: [stat('进驻', `${c.occupants.length} / ${d.room}`), stat('射程', `最多 ${CITY_RANGE}`)],
+      terrain: null,
+      help: mine
+        ? '点击射程内的红色目标，由高亮的士兵开火；点士兵图标换人。'
+        : holder
+          ? '打掉它才能伤到里面的士兵；建筑被摧毁时里面各扣 3 点生命。'
+          : '步兵、狙击手、反坦克战士可以走进去进驻。',
     };
   }
   const hit = buildingById(s, ref.id);
@@ -358,7 +347,8 @@ export class Hud {
   private harvest(s: GameState, ctx: HudCtx): boolean {
     const el = this.harvestEl;
     const p = s.phase === 'player' ? s.players[s.currentPlayer] : null;
-    const up = ctx.humanTurn && !!p && p.ap > 0;
+    // Choosing where a building goes takes the whole picture: the panel stands down until that is done or given up.
+    const up = ctx.humanTurn && !!p && p.ap > 0 && !ctx.placing;
     el.classList.toggle('hidden', !up);
     if (!up || !p) return false;
     const per = HARVEST_YIELD * p.trucks;
@@ -386,8 +376,9 @@ export class Hud {
           return b;
         }),
       ),
-      h('p', { class: 'hint' }, why || `每点行动点：${p.trucks} 台运输车全部出动，每台运回 ${HARVEST_YIELD}`),
     );
+    // The one thing worth saying is why nothing can be gathered.
+    if (why) el.append(h('p', { class: 'hint' }, why));
     return true;
   }
 
@@ -589,8 +580,6 @@ export class Hud {
               cancel,
             ),
           );
-        } else {
-          box.append(h('p', { class: 'hint' }, '选一座建筑，再点击自己领地里的格子放置。建造立即完成；需要电力的建筑按建造顺序分配电力，超出供电数的会停机。'));
         }
         for (const k of BUILDABLE) {
           const d = BUILDINGS[k];
@@ -614,7 +603,7 @@ export class Hud {
         return box;
       }
       case 'produce': {
-        const box = h('div', {}, h('p', { class: 'hint' }, '只列出已建成的建筑能生产的单位。新单位可以立即行动；产量与停机位按通电的建筑数量计算。'));
+        const box = h('div', {});
         // A building the player has not put up says nothing: its units are not on offer at all.
         const built = PRODUCERS.filter((bk) => countBuilding(p, bk) > 0);
         if (!built.length) box.append(h('p', { class: 'hint' }, '还没有能生产单位的建筑。先在“建造”页建一座加工工厂、军营、军工厂或军事机场。'));
@@ -637,7 +626,6 @@ export class Hud {
       case 'structures': {
         const box = h('div', {});
         if (p.buildings.filter((b) => !b.powered).length > 0) box.append(h('p', { class: 'hint', style: 'color:#fca5a5' }, `有 ${p.buildings.filter((b) => !b.powered).length} 座建筑断电。建造发电站（供电 +3）可以恢复。`));
-        box.append(h('p', { class: 'hint' }, `电力 ${p.powerUsed}/${p.powerCap}，按建造顺序分配。炮台与防空炮在敌人攻击基地建筑时各反击一次。`));
         for (const b of [...p.buildings].reverse()) {
           const d = BUILDINGS[b.key];
           const lv = d.levels[b.level - 1];
@@ -702,10 +690,41 @@ export class Hud {
       info.meters ? metersEl(info.meters) : null,
       info.stats.length ? h('div', { class: 'stats' }, ...info.stats) : null,
     );
+    // A building the player holds fires through whichever soldier inside is picked: they are listed here, one to a button.
+    const held = mine && ref?.kind === 'city' ? cityById(s, ref.id) : null;
+    if (held) {
+      const chips = h('div', { class: 'gunners', role: 'group', 'aria-label': '建筑里的士兵' });
+      for (const id of held.occupants) {
+        const hit = unitById(s, id);
+        if (!hit || hit.owner.id !== s.currentPlayer) continue;
+        const ready = !hit.unit.attackUsed;
+        const chip = h(
+          'button',
+          { class: `gunner${ctx.gunner === id ? ' on' : ''}`, disabled: !ready, title: ready ? (ctx.gunner === id ? '开火的就是它' : '点一下换成它开火') : '本回合已经攻击过', 'aria-pressed': ctx.gunner === id ? 'true' : 'false' },
+          iconBox(unitIcon(hit.unit.key)),
+          h('span', {}, UNITS[hit.unit.key].name),
+        );
+        chip.onclick = () => this.a.pick(id);
+        chips.append(chip);
+      }
+      if (held.occupants.length) body.append(chips);
+    }
     // Under the figures: the ground under its feet, how to command it, and the way out.
     const actions: HTMLElement[] = [];
     if (mine) {
       const touch = touchOnly();
+      if (held) {
+        const leave = h('button', { class: 'btn small', title: '让里面的士兵出来，站到建筑周围的空格上' }, h('span', { class: 'btn-ico', html: glyph('leave') }), '解散');
+        leave.onclick = () => this.a.leave(held.id);
+        actions.push(leave);
+      }
+      // One of the player's fighting units that has a rank to go: the way up is one press away.
+      const unit = ref?.kind === 'unit' ? unitById(s, ref.id)?.unit : undefined;
+      if (unit && rankOf(unit) < RANKS.length) {
+        const up = h('button', { class: 'btn small', title: `晋升为${RANKS[rankOf(unit)].name}：攻击和生命各提高，防御 +${RANKS[rankOf(unit)].armor - RANKS[rankOf(unit) - 1].armor}` }, h('span', { class: 'btn-ico', html: glyph('promote') }), '升级');
+        up.onclick = () => this.a.promote(unit.id);
+        actions.push(up);
+      }
       const next = h('button', { class: 'btn small', title: touch ? '轮到下一个还能行动的单位' : '快捷键 Tab' }, '下一个待命');
       next.onclick = this.a.nextUnit;
       const cancel = h('button', { class: 'btn small ghost' }, '取消');

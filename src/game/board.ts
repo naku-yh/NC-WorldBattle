@@ -1,5 +1,5 @@
-import { BOARD_SIZE, TERRAIN, UNITS, ZONE_SIZE } from './data';
-import type { Building, Corner, GameState, MoveMode, PlayerState, Pt, ResourceKey, Terrain, TerrainEffect, Unit, UnitFamily, UnitKey, Waterway } from './types';
+import { BOARD_SIZE, CITY, TERRAIN, UNITS, ZONE_SIZE } from './data';
+import type { Building, CityBuilding, Corner, GameState, MoveMode, PlayerState, Pt, ResourceKey, Terrain, TerrainEffect, Unit, UnitFamily, UnitKey, Waterway } from './types';
 
 /** The four corners in board order: south-west, south-east, north-west, north-east. */
 export function cornersOf(n: number): Corner[] {
@@ -177,32 +177,65 @@ export function passable(s: GameState, x: number, y: number, mode: MoveMode): bo
 export class BoardIndex {
   ground = new Map<string, Unit>();
   air = new Map<string, Unit>();
-  /** Aliens and small spiders, by tile: the id of whatever stands there. */
+  /** Aliens and their small fry, by tile: the id of whatever stands there, on the ground or in the air. */
   others = new Map<string, number>();
   /** Buildings and resource nodes. */
   blocked = new Set<string>();
+  /** The houses and towers of the map, by the tile each stands on. */
+  city = new Map<string, CityBuilding>();
 
   constructor(s: GameState) {
     for (const p of s.players) {
       for (const b of p.buildings) for (const t of tilesOf(b)) this.blocked.add(key(t.x, t.y));
       for (const u of p.units) {
+        // A soldier inside a building is not standing anywhere on the board.
+        if (u.inside !== undefined) continue;
         (UNITS[u.key].unitClass === 'air' ? this.air : this.ground).set(key(u.x, u.y), u);
       }
     }
     for (const n of s.nodes) this.blocked.add(key(n.x, n.y));
     for (const a of s.aliens) this.others.set(key(a.x, a.y), a.id);
     for (const b of s.brood) this.others.set(key(b.x, b.y), b.id);
+    for (const c of s.city ?? []) this.city.set(key(c.x, c.y), c);
   }
 }
 
-/** `selfId` is the id of whoever is asking, so that a thing never blocks its own tile. */
-export function isFree(idx: BoardIndex, s: GameState, x: number, y: number, mode: MoveMode, selfId = 0): boolean {
+/** Whose soldiers hold a house or tower, if anyone's do. */
+export function holderOf(s: GameState, c: CityBuilding): PlayerState | null {
+  for (const p of s.players) if (c.occupants.some((id) => p.units.some((u) => u.id === id))) return p;
+  return null;
+}
+
+/** The house or tower standing on a tile, if there is one. */
+export const cityAt = (s: GameState, x: number, y: number): CityBuilding | null => s.city.find((c) => c.x === x && c.y === y) ?? null;
+
+/**
+ * Whether `unit` may move into the house or tower `c`: soldiers only, while
+ * there is room, and only while nobody else's soldiers hold it. Anything
+ * without a `unit` (an alien, a fresh spawn, a route) finds the door shut.
+ */
+function doorOpen(s: GameState, c: CityBuilding, unit: Pick<Unit, 'key' | 'owner'> | undefined): boolean {
+  if (!unit || !UNITS[unit.key].garrison || c.occupants.length >= CITY[c.kind].room) return false;
+  const holder = holderOf(s, c);
+  return !holder || holder.id === unit.owner;
+}
+
+/**
+ * `selfId` is the id of whoever is asking, so that a thing never blocks its own
+ * tile. `unit` is that same thing when it is a unit: it is what lets a soldier
+ * through the door of a house or tower (see `doorOpen`).
+ */
+export function isFree(idx: BoardIndex, s: GameState, x: number, y: number, mode: MoveMode, selfId = 0, unit?: Pick<Unit, 'key' | 'owner'>): boolean {
   if (!passable(s, x, y, mode)) return false;
   const k = key(x, y);
   if (mode === 'air') {
     const a = idx.air.get(k);
-    return !a || a.id === selfId;
+    // An alien overhead, a dragon or the goddess, holds its tile against wings as much as against feet.
+    const other = idx.others.get(k);
+    return (!a || a.id === selfId) && (other === undefined || other === selfId);
   }
+  const house = idx.city.get(k);
+  if (house && !doorOpen(s, house, unit)) return false;
   if (idx.blocked.has(k)) return false;
   const g = idx.ground.get(k);
   if (g && g.id !== selfId) return false;
@@ -211,6 +244,14 @@ export function isFree(idx: BoardIndex, s: GameState, x: number, y: number, mode
   if (other !== undefined && other !== selfId) return false;
   return true;
 }
+
+/** The four tiles in line with one, up, down, left and right: where a splash reaches. */
+export const DIRS4: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
 
 /** The eight neighbouring tiles, as offsets. */
 export const DIRS8: ReadonlyArray<readonly [number, number]> = [
@@ -236,6 +277,7 @@ export function reachable(
   mode: MoveMode,
   move: number,
   selfId: number,
+  unit?: Pick<Unit, 'key' | 'owner'>,
 ): Map<string, Pt[]> {
   const out = new Map<string, Pt[]>();
   const seen = new Set<string>([key(start.x, start.y)]);
@@ -247,14 +289,16 @@ export function reachable(
         const x = n.x + dx;
         const y = n.y + dy;
         const k = key(x, y);
-        if (seen.has(k) || !isFree(idx, s, x, y, mode, selfId)) continue;
+        if (seen.has(k) || !isFree(idx, s, x, y, mode, selfId, unit)) continue;
         if (mode !== 'air' && dx !== 0 && dy !== 0) {
           // No cutting corners: both side tiles must be open too.
-          if (!isFree(idx, s, x, n.y, mode, selfId) || !isFree(idx, s, n.x, y, mode, selfId)) continue;
+          if (!isFree(idx, s, x, n.y, mode, selfId, unit) || !isFree(idx, s, n.x, y, mode, selfId, unit)) continue;
         }
         seen.add(k);
         const path = [...n.path, { x, y }];
         out.set(k, path);
+        // A soldier that steps into a house or tower is in it: nothing is reached from inside.
+        if (idx.city.has(k)) continue;
         next.push({ x, y, path });
       }
     }
@@ -279,7 +323,8 @@ export function route(s: GameState, from: Pt, target: Pt | Building, range: numb
   const prev = new Int32Array(n * n).fill(-1);
   const start = from.y * n + from.x;
   prev[start] = start;
-  const solid = (x: number, y: number): boolean => !passable(s, x, y, mode) || (mode !== 'air' && idx.blocked.has(key(x, y)));
+  // The houses and towers are walls to a route: computer players never move into one.
+  const solid = (x: number, y: number): boolean => !passable(s, x, y, mode) || (mode !== 'air' && (idx.blocked.has(key(x, y)) || idx.city.has(key(x, y))));
   let frontier = [start];
   while (frontier.length) {
     const next: number[] = [];

@@ -1,15 +1,15 @@
 import * as THREE from 'three';
-import { ALIENS, BUILDINGS, SPIDERLING, UNITS } from '../game/data';
-import { alienById, buildingById, canStillAct, spiderById, statsOf, unitById } from '../game/engine';
-import { DEPOT_LOCAL, supplyRoute, tilesOf, toLocal, toWorld, zoneSize } from '../game/board';
-import type { AlienState, Building, GameEvent, GameState, PlayerState, Pt, Spiderling, Unit } from '../game/types';
+import { ALIENS, BUILDINGS, CITY, RANKS, UNITS } from '../game/data';
+import { alienById, alienStats, buildingById, canStillAct, cityById, maxHpOf, minionById, minionDef, rankOf, statsOf, unitById } from '../game/engine';
+import { DEPOT_LOCAL, cityAt, holderOf, supplyRoute, tilesOf, toLocal, toWorld, zoneSize } from '../game/board';
+import type { AlienState, Building, BuildingKey, CityBuilding, GameEvent, GameState, PlayerState, Pt, Minion, Unit } from '../game/types';
 import { ShieldDome } from './dome';
 import { Floaters, Fx } from './fx';
-import { buildAlien, buildBuilding, buildNode, buildSpiderling, buildTruck, buildUnit, cargoMaterial, scrap, type Model, type TruckModel } from './models';
+import { buildAlien, buildBuilding, buildCity, buildFlag, buildMinion, buildNode, buildTruck, buildUnit, cargoMaterial, scrap, type Model, type TruckModel } from './models';
 import { Plumes, type Steam } from './plumes';
 import { HIGHLIGHT, Scene, worldOf } from './scene';
 
-type Kind = 'unit' | 'building' | 'alien' | 'spider';
+type Kind = 'unit' | 'building' | 'alien' | 'brood' | 'city';
 interface Ref {
   kind: Kind;
   id: number;
@@ -65,6 +65,44 @@ const MARK_EDGE_MAT = new THREE.MeshBasicMaterial({ color: 0x052e12, depthTest: 
 const MARK_FILL_MAT = new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
 
 /** The selection mark, hanging from an entity's root. It starts hidden; the frame loop places it. */
+/**
+ * The insignia of a rank above the first, drawn once and shared: the same
+ * chevrons as `rankIcon` puts on the cards, with a dark edge so that they read
+ * over any ground and any hull.
+ */
+const stripeTex = new Map<number, THREE.Texture>();
+function stripesOf(rank: number): THREE.Texture {
+  const kept = stripeTex.get(rank);
+  if (kept) return kept;
+  const px = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = px;
+  const g = canvas.getContext('2d')!;
+  const at = (v: number): number => (v / 24) * px;
+  const n = Math.min(3, Math.max(1, rank));
+  g.lineJoin = 'round';
+  for (let i = 0; i < n; i++) {
+    const y = 5 + (3 - n) * 2.5 + i * 5;
+    g.beginPath();
+    g.moveTo(at(4), at(y + 3.4));
+    g.lineTo(at(12), at(y - 1.6));
+    g.lineTo(at(20), at(y + 3.4));
+    g.lineTo(at(17.8), at(y + 5.7));
+    g.lineTo(at(12), at(y + 1.2));
+    g.lineTo(at(6.2), at(y + 5.7));
+    g.closePath();
+    g.lineWidth = 7;
+    g.strokeStyle = 'rgba(8, 10, 16, 0.92)';
+    g.stroke();
+    g.fillStyle = '#f5b83d';
+    g.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  stripeTex.set(rank, tex);
+  return tex;
+}
+
 function selectionMark(): THREE.Group {
   const g = new THREE.Group();
   const edge = new THREE.Mesh(MARK_EDGE, MARK_EDGE_MAT);
@@ -165,6 +203,22 @@ function stoneOf(m: THREE.Material): THREE.Material {
   return s;
 }
 
+const doors = new Map<THREE.Material, THREE.Material>();
+/** A house's materials with a blue light in them: its door is open to the selected soldier. Cached like the stone. */
+function doorOf(m: THREE.Material): THREE.Material {
+  let d = doors.get(m);
+  if (!d) {
+    if (m instanceof THREE.MeshStandardMaterial) {
+      const copy = m.clone();
+      copy.emissive.setHex(0x2563eb);
+      copy.emissiveIntensity = 0.55;
+      d = copy;
+    } else d = m;
+    doors.set(m, d);
+  }
+  return d;
+}
+
 /**
  * Little health bar that always faces the camera: what is left, in green, amber
  * or red, over what is gone in dark red, inside a pale frame. The three layers
@@ -216,6 +270,25 @@ class HpBar {
   }
 }
 
+/**
+ * Half-transparent stand-ins for a building's materials, for while the player
+ * is choosing where to put it: the building as it will look, with the light
+ * coming halfway through. One per material, made once.
+ */
+const glass = new WeakMap<THREE.Material, THREE.Material>();
+function glassOf(m: THREE.Material): THREE.Material {
+  let g = glass.get(m);
+  if (!g) {
+    const copy = m.clone();
+    copy.transparent = true;
+    copy.opacity = 0.5;
+    copy.depthWrite = false;
+    g = copy;
+    glass.set(m, g);
+  }
+  return g;
+}
+
 interface View {
   key: string;
   kind: Kind;
@@ -241,6 +314,15 @@ interface View {
   spent: boolean;
   /** The chimneys, if it has any. */
   steam?: Steam;
+  /** The house or tower a soldier is on its way into: once it arrives it leaves the board. */
+  entering?: number;
+  /** The flag over a house or tower, and whose it is (-1 while nobody holds the building). */
+  flag?: THREE.Group;
+  holder?: number;
+  /** Which shape an alien is shown in: 1 as it arrived, 2 once it has changed or been split off one that did. */
+  form?: number;
+  /** The rank insignia over a unit's head, once it holds a rank above the first. */
+  stripes?: THREE.Sprite;
 }
 
 interface TruckView {
@@ -305,6 +387,12 @@ export class GameView {
   private wasIdle = true;
   /** True while no move or fight was playing out at the end of the last frame. */
   private wasStill = true;
+  /** Aliens that have taken their second shape and are waiting for the blow that brought it about to land. */
+  private reshaped = new Set<number>();
+  /** Aliens that have broken apart, and the pieces that come out of them once the blow has landed. */
+  private split = new Map<number, number[]>();
+  /** Houses and towers lit as open to the selected soldier, for as long as they are on its list of tiles. */
+  private lit: View[] = [];
   /** The unit, gun or alien whose reach is ringed on the board: the selection, or whatever is being looked at. */
   private reachRef: Ref | null = null;
   private reach = new ReachRing();
@@ -379,6 +467,8 @@ export class GameView {
     this.selected = null;
     this.reachRef = null;
     this.reach.set(null, 0);
+    this.setPlace(null, null, 0);
+    this.lit = [];
     this.scene.buildBoard(s);
     this.scene.setHighlights([]);
     for (const node of s.nodes) {
@@ -404,7 +494,7 @@ export class GameView {
     const root = new THREE.Group();
     root.position.copy(at);
     root.add(model.group);
-    const hp = new HpBar(kind === 'building' || kind === 'alien' ? 0.9 : 0.5);
+    const hp = new HpBar(kind === 'building' || kind === 'alien' || kind === 'city' ? 0.9 : 0.5);
     hp.group.position.y = model.height + 0.24;
     // For whatever has been hurt. The selection has its own mark: a bar over a unit at full health only read as a dark smudge.
     hp.group.visible = false;
@@ -458,7 +548,30 @@ export class GameView {
     v.speed = def.move * 1.6 + 2;
     v.heading = Math.atan2(-at.x, -at.z);
     v.root.rotation.y = v.heading;
-    v.hp.set(u.hp / def.hp);
+    v.hp.set(u.hp / maxHpOf(u));
+    this.setStripes(v, rankOf(u));
+  }
+
+  /**
+   * The insignia over a unit's head once it holds a rank above the first one,
+   * where everyone starts: nothing at all shows for that rank. It turns to
+   * face the camera by itself and is drawn over everything, like the health
+   * bar, and stands at the right-hand end of that bar.
+   */
+  private setStripes(v: View, rank: number): void {
+    if (rank < 2) return;
+    if (!v.stripes) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: stripesOf(rank), transparent: true, depthTest: false, depthWrite: false }));
+      // The material is this unit's own and goes with it; the picture is shared and stays.
+      (s.material as THREE.Material).userData.owned = true;
+      s.scale.set(0.42, 0.42, 1);
+      // Hung from its foot, so that it sits over the bar rather than across it.
+      s.center.set(0.5, 0);
+      s.position.set(0.3, v.model.height + 0.42, 0);
+      s.renderOrder = 94;
+      v.root.add(s);
+      v.stripes = s;
+    } else (v.stripes.material as THREE.SpriteMaterial).map = stripesOf(rank);
   }
 
   private buildingYaw(b: Building, owner: PlayerState, s: GameState): number {
@@ -497,6 +610,43 @@ export class GameView {
     return v;
   }
 
+  private addCity(c: CityBuilding, s: GameState, pop: boolean): View {
+    const full = CITY[c.kind].hp;
+    const v = this.create('city', c.id, buildCity(c.kind), worldOf(c.x, c.y, s.boardSize), 0.96, 0.96, pop);
+    v.holder = -1;
+    v.hp.set(c.hp / full);
+    v.hp.group.visible = c.hp < full;
+    this.setHolder(v, holderOf(s, c), s);
+    return v;
+  }
+
+  /** Flies the flag of whoever holds a house or tower over it, and takes it down when nobody does. */
+  private setHolder(v: View, holder: PlayerState | null, s: GameState): void {
+    if (!holder) {
+      v.holder = -1;
+      if (v.flag) v.flag.visible = false;
+      return;
+    }
+    if (!v.flag || v.holder !== holder.id) {
+      // The pole and cloth are made of shared stock: letting go of the old one is only taking it off the roof.
+      v.flag?.removeFromParent();
+      v.flag = buildFlag(this.colorOf(s, holder.id));
+      // Planted where the model says its roof is: `height` is the top of a mast or a chimney, which is no place for a pole.
+      v.flag.position.set(...(v.model.flagAt ?? [0.3, v.model.height - 0.02, -0.3]));
+      v.root.add(v.flag);
+      v.holder = holder.id;
+    }
+    v.flag.visible = true;
+  }
+
+  private syncHolders(s: GameState): void {
+    for (const v of this.views.values()) {
+      if (v.kind !== 'city') continue;
+      const c = cityById(s, v.id);
+      this.setHolder(v, c ? holderOf(s, c) : null, s);
+    }
+  }
+
   private upgrade(b: Building, owner: PlayerState, s: GameState): void {
     const old = this.views.get(`building:${b.id}`);
     if (!old) return;
@@ -523,30 +673,49 @@ export class GameView {
   }
 
   private addAlien(a: AlienState, s: GameState, pop: boolean): View {
-    const def = ALIENS[a.key];
-    const model = buildAlien(a.key);
+    const def = alienStats(a);
+    const form = a.form ?? 1;
+    const model = buildAlien(a.key, form);
     const at = worldOf(a.x, a.y, s.boardSize);
-    const reach = a.key === 'shentan' ? 1.1 : 0.9;
+    // The tank and the whole rock giant take up more of their tile than the rest.
+    const vast = a.key === 'shentan' || (a.key === 'zecan' && form === 1);
+    const reach = vast ? 1.1 : 0.9;
     const v = this.create('alien', a.id, model, at, reach, reach, pop);
+    v.form = form;
     v.speed = def.move * 1.6 + 2;
     v.heading = Math.PI;
     v.root.rotation.y = Math.PI;
-    // The ghost never quite touches the ground, and Chloe drifts a little above it.
-    v.hover = def.teleports ? 0.22 : a.key === 'chloe' ? 0.08 : 0;
+    // The ghost never quite touches the ground, and Chloe drifts a little above it; the dragon and the goddess hang in the air.
+    v.hover = def.flies ? 0.62 : def.teleports ? 0.22 : a.key === 'chloe' ? 0.08 : 0;
     v.hit.position.y = v.hover + hitH(model) / 2;
     v.hp.set(a.hp / def.hp);
     v.hp.group.visible = a.hp < def.hp;
     return v;
   }
 
-  private addSpider(b: Spiderling, s: GameState, pop: boolean): View {
-    const model = buildSpiderling();
-    const v = this.create('spider', b.id, model, worldOf(b.x, b.y, s.boardSize), 0.36, 0.36, pop);
-    v.speed = SPIDERLING.move * 1.6 + 2;
+  /** An alien shown in another shape altogether: the old model goes, the new one springs up in its place. */
+  private reshape(old: View, a: AlienState, s: GameState): View {
+    const held = this.selected === old.key;
+    this.remove(old);
+    const v = this.addAlien(a, s, false);
+    v.pop = 0.4;
+    this.popping++;
+    if (held) this.selected = v.key;
+    const at = v.root.position.clone().setY(v.hover + v.model.height * 0.45);
+    this.fx.explode(at, 1.6);
+    this.fx.emit(at, tintOf(alienStats(a).color), 40, 4.5, 0.9);
+    return v;
+  }
+
+  private addMinion(b: Minion, s: GameState, pop: boolean): View {
+    const def = minionDef(b);
+    const model = buildMinion(b.kind ?? 'spider');
+    const v = this.create('brood', b.id, model, worldOf(b.x, b.y, s.boardSize), 0.36, 0.36, pop);
+    v.speed = def.move * 1.6 + 2;
     v.heading = Math.PI;
     v.root.rotation.y = Math.PI;
     v.hit.position.y = hitH(model) / 2;
-    v.hp.set(b.hp / SPIDERLING.hp);
+    v.hp.set(b.hp / def.hp);
     v.hp.group.visible = false;
     return v;
   }
@@ -642,6 +811,12 @@ export class GameView {
       }
       for (const u of p.units) {
         const k = `unit:${u.id}`;
+        // A soldier inside a building is not on the board: whatever still stands in for it goes.
+        if (u.inside !== undefined) {
+          const inside = this.views.get(k);
+          if (inside) this.remove(inside);
+          continue;
+        }
         alive.add(k);
         if (!this.views.has(k)) this.addUnit(u, s, false);
       }
@@ -657,14 +832,26 @@ export class GameView {
     for (const a of s.aliens) {
       const k = `alien:${a.id}`;
       alive.add(k);
-      if (!this.views.has(k)) this.addAlien(a, s, false);
+      const v = this.views.get(k);
+      // One that has taken its second shape is another model altogether, whether or not the blow that brought it about was seen to land.
+      if (!v) this.addAlien(a, s, false);
+      else if (v.form !== (a.form ?? 1)) this.reshape(v, a, s);
     }
     for (const b of s.brood) {
-      const k = `spider:${b.id}`;
+      const k = `brood:${b.id}`;
       alive.add(k);
-      if (!this.views.has(k)) this.addSpider(b, s, false);
+      if (!this.views.has(k)) this.addMinion(b, s, false);
+    }
+    for (const c of s.city) {
+      const k = `city:${c.id}`;
+      alive.add(k);
+      if (!this.views.has(k)) this.addCity(c, s, false);
     }
     for (const [k, v] of [...this.views]) if (!alive.has(k)) this.remove(v);
+    this.syncHolders(s);
+    // Anything that was only waiting for its moment has had it by now.
+    this.reshaped.clear();
+    this.split.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -726,6 +913,19 @@ export class GameView {
         case 'attack':
           this.animateAttack(e, s, hits.get(e));
           break;
+        case 'garrison': {
+          // The soldier walks up to the door first; it goes in when it gets there (see `tick`).
+          const v = this.mover(e.unitId);
+          if (v) v.entering = e.city;
+          break;
+        }
+        case 'leave':
+          // Out into the open, wherever they have come to stand.
+          for (const out of e.units) {
+            const hit = unitById(s, out.unitId);
+            if (hit) this.addUnit(hit.unit, s, true);
+          }
+          break;
         case 'alienSpawn': {
           const a = alienById(s, e.id);
           if (a) this.addAlien(a, s, true);
@@ -747,8 +947,60 @@ export class GameView {
         }
         case 'hatch': {
           for (const id of e.ids) {
-            const b = spiderById(s, id);
-            if (b) this.addSpider(b, s, true);
+            const b = minionById(s, id);
+            if (b) this.addMinion(b, s, true);
+          }
+          break;
+        }
+        case 'promote': {
+          // Raised a rank where it stands: a gleam, and the new rank said over its head.
+          const v = this.views.get(`unit:${e.unitId}`);
+          if (v) {
+            this.setStripes(v, e.rank);
+            v.hp.set(this.ratioOf({ kind: 'unit', id: e.unitId }));
+            const at = v.root.position.clone().setY(v.hover + v.model.height * 0.6);
+            this.fx.flash(at, 0xfbbf24, 1.5, 0.5);
+            this.fx.emit(at, 0xfde68a, 22, 3, 0.9);
+            this.floaters.text(`晋升 ${RANKS[e.rank - 1].name}`, at.clone().setY(at.y + 0.45), 'gain');
+          }
+          break;
+        }
+        case 'raise':
+          // Bone where a soldier stood a moment ago.
+          for (const id of e.ids) {
+            const b = minionById(s, id);
+            if (!b) continue;
+            this.addMinion(b, s, true);
+            this.fx.emit(worldOf(b.x, b.y, s.boardSize).setY(0.35), 0xe7e5d8, 12, 1.8, 0.7);
+          }
+          break;
+        case 'morph':
+          // Played out with the blow that brought it about (see `animateAttack`), so that the old shape is seen to fall first.
+          this.reshaped.add(e.id);
+          break;
+        case 'split':
+          this.split.set(e.from, e.ids);
+          break;
+        case 'burst': {
+          // A sheet of white light over the nine tiles, then what it did to each thing caught.
+          const at = worldOf(e.at.x, e.at.y, s.boardSize);
+          this.fx.flash(at.clone().setY(0.55), 0xffffff, 4.6, 0.6);
+          this.fx.emit(at.clone().setY(0.7), 0xffffff, 60, 5.5, 1);
+          this.fx.after(0.1, () => this.fx.flash(at.clone().setY(0.12), 0xe0e7ff, 3.6, 0.7));
+          for (const h of e.hits) {
+            const spot = worldOf(h.pos.x, h.pos.y, s.boardSize).setY(0.38);
+            this.fx.after(0.2, () => {
+              this.floaters.text(h.amount > 0 ? `-${h.amount}` : '格挡', spot, h.amount > 0 ? 'dmg' : 'block');
+              const v = this.views.get(keyOf(h.target));
+              if (!v) return;
+              if (!this.isAlive(h.target)) {
+                this.fx.explode(v.root.position.clone().setY(v.hover + v.model.height * 0.4), v.kind === 'building' || v.kind === 'city' ? 1.3 : 0.75);
+                this.remove(v);
+              } else {
+                v.hp.set(this.ratioOf(h.target));
+                v.hp.group.visible = true;
+              }
+            });
           }
           break;
         }
@@ -776,6 +1028,7 @@ export class GameView {
     // is built or raised a rung while the picture happens to be still.
     this.syncPower(s);
     this.syncNets(s);
+    this.syncHolders(s);
     // A turn that has just ended takes the stone off at once; the ground a unit has arrived on may reach further or less far.
     this.syncSpent(s);
     this.syncReach();
@@ -845,8 +1098,25 @@ export class GameView {
           range = BUILDINGS[hit.building.key].levels[hit.building.level - 1].range;
           own = hit.owner.id === s.currentPlayer && s.phase === 'player';
         }
-      } else if (ref.kind === 'alien') range = ALIENS[alienById(s, ref.id)?.key ?? 'chloe'].range;
-      else range = SPIDERLING.range;
+      } else if (ref.kind === 'alien') {
+        const a = alienById(s, ref.id);
+        if (a) range = alienStats(a).range;
+      } else if (ref.kind === 'brood') {
+        const b = minionById(s, ref.id);
+        if (b) range = minionDef(b).range;
+      }
+      else {
+        // As far as the longest arm inside it reaches, which is never past the windows.
+        const c = cityById(s, ref.id);
+        if (c) {
+          for (const id of c.occupants) {
+            const hit = unitById(s, id);
+            if (hit) range = Math.max(range, statsOf(s, hit.unit).range);
+          }
+          const holder = holderOf(s, c);
+          own = !!holder && holder.id === s.currentPlayer && s.phase === 'player';
+        }
+      }
     }
     // A weapon reaches every tile whose centre is within its range, counted tile by tile. So the circle
     // runs just outside the farthest of those tiles along the four sides of it.
@@ -857,15 +1127,19 @@ export class GameView {
     const s = this.state!;
     if (r.kind === 'alien') {
       const a = alienById(s, r.id);
-      return a ? a.hp / ALIENS[a.key].hp : 0;
+      return a ? a.hp / alienStats(a).hp : 0;
     }
-    if (r.kind === 'spider') {
-      const b = spiderById(s, r.id);
-      return b ? b.hp / SPIDERLING.hp : 0;
+    if (r.kind === 'brood') {
+      const b = minionById(s, r.id);
+      return b ? b.hp / minionDef(b).hp : 0;
     }
     if (r.kind === 'unit') {
       const hit = unitById(s, r.id);
-      return hit ? hit.unit.hp / UNITS[hit.unit.key].hp : 0;
+      return hit ? hit.unit.hp / maxHpOf(hit.unit) : 0;
+    }
+    if (r.kind === 'city') {
+      const c = cityById(s, r.id);
+      return c ? c.hp / CITY[c.kind].hp : 0;
     }
     const hit = buildingById(s, r.id);
     return hit ? hit.building.hp / hit.building.maxHp : 0;
@@ -874,13 +1148,14 @@ export class GameView {
   private isAlive(r: Ref): boolean {
     const s = this.state!;
     if (r.kind === 'alien') return alienById(s, r.id) !== null;
-    if (r.kind === 'spider') return spiderById(s, r.id) !== null;
+    if (r.kind === 'brood') return minionById(s, r.id) !== null;
+    if (r.kind === 'city') return cityById(s, r.id) !== null;
     return r.kind === 'unit' ? unitById(s, r.id) !== null : buildingById(s, r.id) !== null;
   }
 
   /** Whatever can walk: a unit, an alien or a spider. Their ids never overlap. */
   private mover(id: number): View | null {
-    return this.views.get(`unit:${id}`) ?? this.views.get(`alien:${id}`) ?? this.views.get(`spider:${id}`) ?? null;
+    return this.views.get(`unit:${id}`) ?? this.views.get(`alien:${id}`) ?? this.views.get(`brood:${id}`) ?? null;
   }
 
   private animateAttack(e: Extract<GameEvent, { type: 'attack' }>, s: GameState, hit: PendingHit | undefined): void {
@@ -907,14 +1182,43 @@ export class GameView {
         if (net?.powered) net.dome.hit(to);
       }
       const v = this.views.get(keyOf(target));
-      if (!v) return;
-      if (hit.lethal || !this.isAlive(target)) {
-        this.fx.explode(v.root.position.clone().setY(v.hover + v.model.height * 0.4), v.kind === 'alien' ? 1.9 : v.kind === 'building' ? 1.3 : v.kind === 'spider' ? 0.4 : 0.75);
-        this.remove(v);
-      } else {
-        v.hp.set(this.ratioOf(target));
-        v.hp.group.visible = true;
+      if (v) {
+        if (hit.lethal || !this.isAlive(target)) {
+          this.fx.explode(v.root.position.clone().setY(v.hover + v.model.height * 0.4), v.kind === 'alien' ? 1.9 : v.kind === 'building' || v.kind === 'city' ? 1.3 : v.kind === 'brood' ? 0.4 : 0.75);
+          this.remove(v);
+          // A giant that has just broken apart: its pieces come out of the rubble.
+          const pieces = target.kind === 'alien' ? this.split.get(target.id) : undefined;
+          if (pieces) {
+            this.split.delete(target.id);
+            for (const id of pieces) {
+              const piece = alienById(s, id);
+              if (piece) this.addAlien(piece, s, true);
+            }
+          }
+        } else if (target.kind === 'alien' && this.reshaped.delete(target.id)) {
+          // Down, and up again as something else.
+          const a = alienById(s, target.id);
+          if (a) this.reshape(v, a, s);
+        } else {
+          v.hp.set(this.ratioOf(target));
+          v.hp.group.visible = true;
+        }
       }
+      // What the blast caught on the tiles round the target shows with the hit itself.
+      for (const h of e.splash ?? []) {
+        const side = this.views.get(keyOf(h.target));
+        const at = worldOf(h.pos.x, h.pos.y, n);
+        this.floaters.text(h.amount > 0 ? `-${h.amount}` : '格挡', at.clone().setY(at.y + 0.35), h.amount > 0 ? 'dmg' : 'block');
+        if (!side) continue;
+        if (!this.isAlive(h.target)) {
+          this.fx.explode(side.root.position.clone().setY(side.hover + side.model.height * 0.4), 0.75);
+          this.remove(side);
+        } else {
+          side.hp.set(this.ratioOf(h.target));
+          side.hp.group.visible = true;
+        }
+      }
+      if (e.splash?.length) this.fx.blast(to);
     };
     const flight = clamp(from.distanceTo(to) / 16, 0.1, 0.42);
     for (let i = 0; i < e.shots; i++) {
@@ -939,7 +1243,8 @@ export class GameView {
     for (const hit of ray.intersectObjects(this.pickables, false)) {
       const v = this.views.get(hit.object.userData.key as string);
       if (!v) continue;
-      const score = hit.distance - (v.kind === 'building' ? 0 : 0.6);
+      // A house or tower is a wall to click on, like a building.
+      const score = hit.distance - (v.kind === 'building' || v.kind === 'city' ? 0 : 0.6);
       if (!best || score < best.score) best = { view: v, score };
     }
     const view = best ? best.view : null;
@@ -953,13 +1258,17 @@ export class GameView {
   tilesOf(ref: Ref): Pt[] {
     const s = this.state;
     if (!s) return [];
-    if (ref.kind === 'alien' || ref.kind === 'spider') {
-      const thing = ref.kind === 'alien' ? alienById(s, ref.id) : spiderById(s, ref.id);
+    if (ref.kind === 'alien' || ref.kind === 'brood') {
+      const thing = ref.kind === 'alien' ? alienById(s, ref.id) : minionById(s, ref.id);
       return thing ? [{ x: thing.x, y: thing.y }] : [];
     }
     if (ref.kind === 'unit') {
       const hit = unitById(s, ref.id);
       return hit ? [{ x: hit.unit.x, y: hit.unit.y }] : [];
+    }
+    if (ref.kind === 'city') {
+      const c = cityById(s, ref.id);
+      return c ? [{ x: c.x, y: c.y }] : [];
     }
     const hit = buildingById(s, ref.id);
     return hit ? tilesOf(hit.building) : [];
@@ -977,11 +1286,86 @@ export class GameView {
       }
     }
     this.scene.setHighlights(tiles);
+    // A house or tower stands over its tile, so the blue square underneath is all but hidden: the building itself is lit instead.
+    for (const v of this.lit) this.setDoor(v, false);
+    this.lit = [];
+    for (const m of move) {
+      const house = this.state ? cityAt(this.state, m.x, m.y) : null;
+      const v = house ? this.views.get(`city:${house.id}`) : undefined;
+      if (v) {
+        this.setDoor(v, true);
+        this.lit.push(v);
+      }
+    }
+  }
+
+  /** Lights a house or tower from within, blue, while the selected soldier could walk into it. Its materials are swapped, not changed: they are shared with every other building of the kind. */
+  private setDoor(v: View, on: boolean): void {
+    v.model.group.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (on) {
+        mesh.userData.paint = mesh.material;
+        mesh.material = doorOf(mesh.material as THREE.Material);
+      } else if (mesh.userData.paint) {
+        mesh.material = mesh.userData.paint;
+        delete mesh.userData.paint;
+      }
+    });
   }
 
   /** Plain coloured squares, e.g. everywhere a building could be put. */
   highlightTiles(tiles: Pt[], color: number): void {
     this.scene.setHighlights(tiles.map((t) => ({ ...t, color })));
+  }
+
+  /** Half-transparent buildings for while one is being placed, by kind and colour. */
+  private ghosts = new Map<string, THREE.Group>();
+  private ghostKey = '';
+
+  /**
+   * Puts a half-transparent copy of `key` on the board as it would stand with
+   * its top-left tile on `at`, or takes it away. It is the building itself,
+   * seen through: whether the spot is allowed is for the coloured squares
+   * underneath to say.
+   */
+  setPlace(key: BuildingKey | null, at: Pt | null, color: number, yaw = 0): void {
+    const want = key && at ? `${key}:${color}` : '';
+    if (want !== this.ghostKey) {
+      const old = this.ghosts.get(this.ghostKey);
+      if (old) old.visible = false;
+      this.ghostKey = want;
+    }
+    if (!key || !at) return;
+    let g = this.ghosts.get(want);
+    if (!g) {
+      g = this.ghostOf(key, color);
+      this.ghosts.set(want, g);
+      // With the board's own marks rather than its entities: it does not go when a match does.
+      this.scene.overlay.add(g);
+    }
+    const def = BUILDINGS[key];
+    g.position.copy(worldOf(at.x + (def.w - 1) / 2, at.y + (def.h - 1) / 2, this.state?.boardSize ?? 20));
+    g.rotation.y = yaw;
+    g.visible = true;
+  }
+
+  /** A building's model with every surface let halfway through the light, and casting no shadow. */
+  private ghostOf(key: BuildingKey, color: number): THREE.Group {
+    const root = new THREE.Group();
+    const model = buildBuilding(key, 1, color);
+    if (model) {
+      model.group.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.material = glassOf(mesh.material as THREE.Material);
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+      });
+      root.add(model.group);
+    }
+    root.visible = false;
+    return root;
   }
 
   setHover(tile: Pt | null): void {
@@ -1015,6 +1399,16 @@ export class GameView {
         const x = v.pop - 1;
         v.root.scale.setScalar(Math.max(0.01, 1 + 2.70158 * x * x * x + 1.70158 * x * x));
         popping++;
+      }
+      // A soldier that has walked up to a building it is moving into goes in, and the flag goes up.
+      if (v.entering !== undefined && !v.path.length) {
+        const into = v.entering;
+        v.entering = undefined;
+        this.remove(v);
+        const house = this.views.get(`city:${into}`);
+        const held = house && this.state ? cityById(this.state, into) : null;
+        if (house && held && this.state) this.setHolder(house, holderOf(this.state, held), this.state);
+        continue;
       }
       if (v.path.length) {
         moving++;
@@ -1050,7 +1444,7 @@ export class GameView {
       if (v.hp.group.visible) faceCamera(v.hp.group, v.root, camQ);
       v.mark.visible = v.key === this.selected;
       if (v.mark.visible) {
-        const big = v.kind === 'building' || v.kind === 'alien';
+        const big = v.kind === 'building' || v.kind === 'alien' || v.kind === 'city';
         v.mark.position.set(0, v.model.height + (v.hp.group.visible ? 0.51 : 0.29) + Math.sin(this.clock * 4) * 0.025, 0);
         v.mark.scale.setScalar(big ? 1.35 : 1);
         faceCamera(v.mark, v.root, camQ);
@@ -1132,7 +1526,7 @@ export class GameView {
     ring.visible = !!sel;
     if (sel) {
       ring.position.set(sel.root.position.x, 0.05, sel.root.position.z);
-      const size = sel.kind === 'building' ? 1.5 : sel.kind === 'alien' ? 1.25 : sel.hover > 0 ? 0.8 : 0.62 + Math.sin(this.clock * 5) * 0.06;
+      const size = sel.kind === 'building' || sel.kind === 'city' ? 1.5 : sel.kind === 'alien' ? 1.25 : sel.hover > 0 ? 0.8 : 0.62 + Math.sin(this.clock * 5) * 0.06;
       ring.scale.setScalar(size);
     }
     // The reach circle keeps to the heels of whatever it belongs to, a unit on the move included.
