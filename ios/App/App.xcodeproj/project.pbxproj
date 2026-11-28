@@ -296,7 +296,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.95.0;
+				MARKETING_VERSION = 0.98.0;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
 				PRODUCT_BUNDLE_IDENTIFIER = com.nakustudio.NCWorldBattle;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -319,7 +319,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.95.0;
+				MARKETING_VERSION = 0.98.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nakustudio.NCWorldBattle;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
