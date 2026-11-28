@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ALIEN_CAP, ALIEN_EVERY, ALIEN_KEYS, ALIENS, BROOD_CAP, SCORE_BUILDING, SCORE_SPIDER, SCORE_UNIT, SPIDERLING, UNITS } from '../data';
-import { alienById, attackTargets, buildSpots, canUpgrade, hqOf, placementError, spiderById } from '../engine';
+import { alienById, alienStats, attackTargets, buildSpots, canUpgrade, hqOf, placementError, minionById } from '../engine';
 import { cheb, key, ringTiles, terrainAt, toWorld, zoneSize } from '../board';
 import { apply, dropAlien, dropSpider, newGame, placeBuilding, rich, setTerrain, spawn, toTurn, tryApply } from './helpers';
-import type { AlienKey, AlienState, GameEvent, GameState, Spiderling, Terrain } from '../types';
+import type { AlienKey, AlienState, GameEvent, GameState, Minion, Terrain } from '../types';
 
 const unit = (id: number): { kind: 'unit'; id: number } => ({ kind: 'unit', id });
 
@@ -42,7 +42,60 @@ describe('五种外星人', () => {
     expect(ALIENS.meiling).toMatchObject({ attack: 10, range: 4 });
     expect(ALIENS.shentan).toMatchObject({ attack: 15, defense: 8, range: 3, move: 1 });
     expect(ALIENS.guimei).toMatchObject({ attack: 13, defense: 2, teleports: true });
-    expect(SPIDERLING).toMatchObject({ hp: 3, attack: 2, defense: 1 });
+    expect(SPIDERLING).toMatchObject({ hp: 3, attack: 4, defense: 1 });
+    // Half again the life they used to have; 牛美菱's 52.5 rounds up.
+    expect(ALIEN_KEYS.map((k) => ALIENS[k].hp)).toEqual([135, 75, 53, 90, 45]);
+  });
+
+  it('第一个降临的用卡面上的数值，之后每个比上一个多基础数值的两成；射程和移动不变', () => {
+    const base = ALIENS.chloe;
+    const at = (wave: number): AlienState => ({ id: 1, key: 'chloe', x: 0, y: 0, hp: 0, arrived: 1, wave, hurt: {} });
+    expect(alienStats(at(1))).toBe(base);
+    expect(alienStats(at(2))).toMatchObject({ hp: 162, attack: 16, defense: 5, range: base.range, move: base.move });
+    expect(alienStats(at(3))).toMatchObject({ hp: 189, attack: 18, defense: 6 });
+    expect(alienStats(at(6))).toMatchObject({ hp: 270, attack: 26, defense: 8 });
+    expect(alienStats(at(11))).toMatchObject({ hp: 405, attack: 39, defense: 12 });
+    // The rewards and what it looks like are the same for every arrival.
+    expect(alienStats(at(4))).toMatchObject({ reward: base.reward, bounty: base.bounty, shots: base.shots, fx: base.fx });
+  });
+
+  it('后到的外星人更难打死，打人更疼：第三个降临的克洛伊生命 189、攻击 18', () => {
+    const s = newGame();
+    toTurn(s);
+    const third = dropAlien(s, 'chloe', 10, 10);
+    third.wave = 3;
+    third.hp = alienStats(third).hp;
+    const tank = spawn(s, 0, 'tank', 10, 11);
+    apply(s, { type: 'ATTACK', source: unit(tank.id), target: { kind: 'alien', id: third.id } });
+    // A tank's 10 against armour of 6.
+    expect(third.hp).toBe(189 - 4);
+    // Out of everyone's turn and on to the aliens' go.
+    while (s.phase === 'player') apply(s, { type: 'END_TURN' });
+    alienGo(s);
+    expect(tank.hp).toBe(15 - (18 - 1));
+  });
+
+  it('一局里降临的顺序记在各自身上：第一个是 1，第二个是 2', () => {
+    for (const seed of [1, 2, 3]) {
+      const s = newGame(['human', 'human'], seed, 40);
+      for (const p of s.players) {
+        const hq = hqOf(p)!;
+        hq.hp = hq.maxHp = 99999;
+      }
+      const hpAtArrival: Array<[number, number]> = [];
+      for (let guard = 0; s.aliens.length < 2 && guard < 1000; guard++) {
+        if (s.phase === 'roundStart') {
+          apply(s, { type: 'ROLL_DICE' });
+          for (const a of s.aliens) if (!hpAtArrival.some(([id]) => id === a.id)) hpAtArrival.push([a.id, a.hp]);
+        } else apply(s, { type: s.phase === 'player' ? 'END_TURN' : 'NEXT' });
+      }
+      expect(s.aliens).toHaveLength(2);
+      expect(s.aliens.map((a) => a.wave)).toEqual([1, 2]);
+      expect(s.aliensSeen).toBe(2);
+      const [[, first], [, second]] = hpAtArrival;
+      expect(first).toBe(ALIENS[s.aliens[0].key].hp);
+      expect(second).toBe(Math.round(ALIENS[s.aliens[1].key].hp * 1.2));
+    }
   });
 
   it('奎德每回合孵出 1–3 只小蜘蛛，一窝至多 8 只', () => {
@@ -127,7 +180,7 @@ describe('五种外星人', () => {
       const events = alienGo(s);
       expect(movesOf(events, girl.id)).toBe(0);
       // A tank in the open: armour 3 − 2.
-      expect(tank.hp).toBe(16 - (10 - 1));
+      expect(tank.hp).toBe(15 - (10 - 1));
     }
     // One tile out of reach, she has to close in first — though, like every alien, she wanders now and then.
     let fired = 0;
@@ -151,7 +204,7 @@ describe('五种外星人', () => {
     const tank = spawn(s, 0, 'tank', 9, 10);
     const events = alienGo(s);
     expect(movesOf(events, big.id)).toBe(0);
-    expect(tank.hp).toBe(16 - (15 - 1));
+    expect(tank.hp).toBe(15 - (15 - 1));
 
     const t = newGame(['human', 'human']);
     const slow = dropAlien(t, 'shentan', 5, 10);
@@ -164,7 +217,7 @@ describe('五种外星人', () => {
     for (let seed = 1; seed <= 30; seed++) {
       const s = newGame(['human', 'human'], seed);
       ALIEN_KEYS.forEach((k, i) => dropAlien(s, k, 9 + (i % 2), 8 + Math.floor(i / 2)));
-      const stray: Spiderling = { id: s.nextId++, owner: 999, x: 12, y: 12, hp: SPIDERLING.hp };
+      const stray: Minion = { id: s.nextId++, owner: 999, x: 12, y: 12, hp: SPIDERLING.hp };
       s.brood.push(stray);
       const events = alienGo(s);
       for (const e of strikes(events)) expect(['unit', 'building']).toContain(e.target.kind);
@@ -178,11 +231,11 @@ describe('五种外星人', () => {
     const stray = dropSpider(s, 999, 10, 10);
     const foot = spawn(s, 0, 'infantry', 11, 10);
     const events = alienGo(s);
-    const bites = strikes(events).filter((e) => e.source.kind === 'spider');
+    const bites = strikes(events).filter((e) => e.source.kind === 'brood');
     expect(bites).toHaveLength(1);
     expect(bites[0].target).toEqual(unit(foot.id));
-    expect(foot.hp).toBe(6 - 2);
-    expect(spiderById(s, stray.id)).not.toBeNull();
+    expect(foot.hp).toBe(6 - (4 - 1)); // the spider's 4 against the soldier's 1
+    expect(minionById(s, stray.id)).not.toBeNull();
   });
 });
 
@@ -231,7 +284,7 @@ describe('外星人的刷新', () => {
     dropSpider(s, beast.id, 11, 11);
     const tank = spawn(s, 0, 'tank', 9, 9);
     const targets = attackTargets(s, unit(tank.id)).map((t) => `${t.kind}:${t.id}`);
-    expect(targets).toEqual([`spider:${s.brood[0].id}`, `alien:${beast.id}`].sort((a, b) => (a < b ? -1 : 1)));
+    expect(targets).toEqual([`brood:${s.brood[0].id}`, `alien:${beast.id}`].sort((a, b) => (a < b ? -1 : 1)));
     // An infantryman standing out in the open, away from every base, has nothing to shoot at.
     expect(attackTargets(s, unit(spawn(s, 0, 'infantry', 3, 12).id))).toEqual([]);
   });
@@ -262,7 +315,7 @@ describe('积分', () => {
     const bug = dropSpider(s, 999, 10, 10);
     const ore = s.players[0].resources.ore;
     // 3 HP behind 1 armour: a tank's 10 − 1 squashes it outright.
-    const events = apply(s, { type: 'ATTACK', source: unit(spawn(s, 0, 'tank', 10, 11).id), target: { kind: 'spider', id: bug.id } });
+    const events = apply(s, { type: 'ATTACK', source: unit(spawn(s, 0, 'tank', 10, 11).id), target: { kind: 'brood', id: bug.id } });
     expect(s.brood).toHaveLength(0);
     expect(s.players[0].score).toBe(SCORE_SPIDER);
     expect(s.players[0].resources.ore).toBe(ore + (SPIDERLING.reward.ore ?? 0));
@@ -287,8 +340,8 @@ describe('积分', () => {
 
 describe('数值调整', () => {
   it('坦克更便宜，天启双塔坦克更贵', () => {
-    expect(UNITS.tank.cost).toEqual({ ore: 500, oil: 300 });
-    expect(UNITS.apocalypse.cost).toEqual({ ore: 2000, oil: 1300 });
+    expect(UNITS.tank.cost).toEqual({ ore: 200, oil: 150 });
+    expect(UNITS.apocalypse.cost).toEqual({ ore: 2200, oil: 1300, meat: 150 });
     expect(UNITS.tank.cost.ore!).toBeLessThan(UNITS.twinTank.cost.ore!);
     expect(UNITS.apocalypse.cost.ore!).toBeGreaterThan(UNITS.laserTank.cost.ore! + 500);
   });

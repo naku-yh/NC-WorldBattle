@@ -1,28 +1,79 @@
-import { ALIENS, BUILDINGS, SPIDERLING, TRUCKS_PER_FACTORY, UNITS } from './data';
-import { alienById, attackPower, attackTargets, baseStats, buildingById, canAfford, canBuild, canProduce, canUpgrade, countBuilding, defenseOf, hqOf, statsOf, unitById } from './engine';
-import { BoardIndex, buildingCenter, cheb, key, moveModeOf, nearestOpen, reachable, route, toWorld, withinRange } from './board';
-import type { Action, Building, BuildingKey, CombatStats, Cost, EntityRef, GameState, PlayerState, Pt, ResourceKey, Unit, UnitKey } from './types';
+import { BUILDINGS, RANKS, SCORE_UNIT, TRUCKS_PER_FACTORY, UNITS } from './data';
+import { alienById, alienStats, attackAgainst, attackPower, attackTargets, baseStats, buildingById, canAfford, canBuild, canProduce, canUpgrade, countBuilding, defenseOf, hqOf, minionById, minionDef, promoteCost, rankOf, rankStats, statsOf, unitById } from './engine';
+import { BoardIndex, DIRS4, buildingCenter, cheb, key, moveModeOf, nearestOpen, reachable, route, toWorld, withinRange } from './board';
+import type { Action, BonusClass, Building, BuildingKey, CombatStats, Cost, Difficulty, EntityRef, GameState, MoveMode, PlayerState, Pt, ResourceKey, TargetClass, Unit, UnitKey } from './types';
 
 const RES_KEYS: ResourceKey[] = ['ore', 'oil', 'meat'];
 
 /** An army sets off once its total attack power reaches this. */
 const WAVE_STRENGTH = 16;
 /**
+ * How the computer players go about the war under each difficulty. On the low
+ * game no war factory goes up before the thirteenth round and no airport ever;
+ * on the high game the war factory is saved for right after the first barracks,
+ * planes fly from the sixth round on, and every kind of tank and aircraft is made.
+ */
+const PROFILE: Record<Difficulty, { factoryFrom: number; airportFrom: number | null }> = {
+  low: { factoryFrom: 13, airportFrom: null },
+  high: { factoryFrom: 1, airportFrom: 5 },
+};
+/** A file from before there was a difficulty carries the gentler game. */
+const isHard = (s: GameState): boolean => s.difficulty !== 'low';
+const profileOf = (s: GameState): { factoryFrom: number; airportFrom: number | null } => PROFILE[isHard(s) ? 'high' : 'low'];
+/**
  * Where units gather before a push, in zone-local coordinates: just outside
  * the zone's corner, on the player's own side of the waterway.
  */
 const STAGE = 6;
 
-/** Damage one full attack with these stats does to something with `defense` HP of armour. */
-export function damageOf(st: CombatStats, defense: number): number {
+/** Damage one full attack with these stats does to a target with `defense` HP of armour, of class `cls`, and of the kind `vs` (for the weapons that hit some kinds twice as hard). */
+export function damageOf(st: CombatStats, defense: number, cls: TargetClass = 'ground', vs: BonusClass | null = null): number {
   let n = 0;
-  for (let i = 0; i < st.shots; i++) n += Math.max(0, st.attack - (st.pierce ? 0 : defense));
+  const attack = attackAgainst(st, cls, vs);
+  for (let i = 0; i < st.shots; i++) n += Math.max(0, attack - (st.pierce ? 0 : defense));
   return n;
 }
 
+/** How many tiles the fixed obstacles of the board take up: buildings and the map's houses and towers. Routes only change when this does. */
+function wallsOf(s: GameState): number {
+  let n = s.city.length;
+  for (const p of s.players) for (const b of p.buildings) n += b.w * b.h;
+  return n;
+}
+
+/**
+ * Routes already worked out, by the board, its obstacles, where they start,
+ * where they are headed and how far they need to get. A route ignores units,
+ * so it holds for as long as the obstacles stand. Sweeping an army for its
+ * next order asks for the same routes over and over, and with a full army
+ * that cost more than the rest of the computer's turn put together.
+ */
+const routes = new Map<string, Pt[] | null>();
+function routeOf(s: GameState, from: Pt, target: Pt | Building, range: number, mode: MoveMode): Pt[] | null {
+  const k = `${s.boardSize}|${wallsOf(s)}|${mode}|${range}|${from.x},${from.y}|${target.x},${target.y}|${'w' in target ? `${target.w}x${target.h}` : ''}`;
+  if (!routes.has(k)) {
+    if (routes.size > 6000) routes.clear();
+    routes.set(k, route(s, from, target, range, mode));
+  }
+  return routes.get(k)!;
+}
+
+/** Where each player's army gathers, per board: it only moves if a building goes up in the way. */
+const stages = new WeakMap<GameState, { walls: number; at: Map<number, Pt> }>();
 function stagingPoint(s: GameState, p: PlayerState): Pt {
-  const want = toWorld(s.corners[p.corner], STAGE, STAGE);
-  return nearestOpen(s, want, 'foot') ?? want;
+  const walls = wallsOf(s);
+  let kept = stages.get(s);
+  if (!kept || kept.walls !== walls) {
+    kept = { walls, at: new Map() };
+    stages.set(s, kept);
+  }
+  let at = kept.at.get(p.id);
+  if (!at) {
+    const want = toWorld(s.corners[p.corner], STAGE, STAGE);
+    at = nearestOpen(s, want, 'foot') ?? want;
+    kept.at.set(p.id, at);
+  }
+  return at;
 }
 
 function powerDemand(p: PlayerState): number {
@@ -68,10 +119,13 @@ function goals(s: GameState, p: PlayerState): Goal[] {
   if (has('barracks') === 0) add('barracks', true);
   if (threatened(s, p) && has('turret') < 2) add('turret', true);
   if (enemyAir(s, p) && has('aaGun') < 1) add('aaGun', true);
-  if (has('warFactory') === 0) add('warFactory', false);
+  // The high game saves up for its war factory as soon as it has a barracks; the low one waits for the thirteenth round and buys it with what is left over.
+  const profile = profileOf(s);
+  if (has('warFactory') === 0 && s.turn >= profile.factoryFrom) add('warFactory', isHard(s));
+  // The high game wants its airfield next, before any second processing plant: the planes are the point of it.
+  if (profile.airportFrom !== null && s.turn >= profile.airportFrom && has('airport') < 1) add('airport', false);
   if (has('factory') < 2) add('factory', false);
   if (has('turret') < 1) add('turret', false);
-  if (s.turn >= 9 && has('airport') < 1) add('airport', false);
   return out;
 }
 
@@ -97,6 +151,18 @@ function pickResource(s: GameState, p: PlayerState): ResourceKey {
   return best;
 }
 
+/**
+ * The aircraft the computer is after next: on the high game, the first two for
+ * an airfield it has. Null when it has none to fly from or already has its pair.
+ */
+function planeWanted(s: GameState, p: PlayerState): UnitKey | null {
+  if (!isHard(s)) return null;
+  const flies = p.units.filter((u) => UNITS[u.key].unitClass === 'air').length;
+  if (flies >= 2 || !p.buildings.some((b) => b.key === 'airport' && b.powered)) return null;
+  // Something to answer enemy planes with; otherwise a fighter first and then a bomber.
+  return enemyAir(s, p) || flies === 0 ? 'fighter' : 'bomber';
+}
+
 function scale(cost: Cost, n: number): Cost {
   return { ore: (cost.ore ?? 0) * n, oil: (cost.oil ?? 0) * n, meat: (cost.meat ?? 0) * n };
 }
@@ -110,10 +176,19 @@ function produceUnit(s: GameState, p: PlayerState, reserve: Cost): Action | null
     BUILDINGS[bk].perTurnCap * p.buildings.filter((b) => b.key === bk && b.powered).length -
     (p.producedThisTurn[bk] ?? 0);
   const air = enemyAir(s, p);
+  const hard = isHard(s);
+  const profile = profileOf(s);
+  // An airfield with fewer than two aircraft gets its next one before anything else, once it can be paid for.
+  const wanted = planeWanted(s, p);
+  if (wanted && canProduce(s, p, wanted) === null && withinBudget(p, UNITS[wanted].cost, reserve)) return { type: 'PRODUCE', unit: wanted };
   const list: UnitKey[] = [];
-  if (left('warFactory') > 0) list.push('tank', 'missileTank', 'twinTank', air ? 'aaTank' : 'laserTank', 'laserTank', 'apocalypse');
-  if (left('barracks') > 0) list.push('infantry', 'atSoldier', 'sniper', 'infantry');
-  if (s.turn >= 8) list.push('fighter');
+  if (left('warFactory') > 0) {
+    // The high game fields everything; the low one stays with the plainer tanks.
+    list.push('tank', 'missileTank', hard ? 'twinTank' : 'laserTank', air ? 'aaTank' : hard ? 'apocalypse' : 'laserTank', hard ? 'missileTank' : 'laserTank');
+  }
+  if (left('barracks') > 0) list.push('infantry', 'atSoldier', 'sniper', hard ? 'specOps' : 'infantry', hard ? 'mech' : 'infantry');
+  // Only the high game flies at all.
+  if (profile.airportFrom !== null && s.turn >= profile.airportFrom) list.push('fighter', air ? 'fighter' : 'bomber');
   // Rotate the mix so armies don't all look the same.
   const rot = list.length ? (s.turn + p.id * 2) % list.length : 0;
   for (let i = 0; i < list.length; i++) {
@@ -123,11 +198,44 @@ function produceUnit(s: GameState, p: PlayerState, reserve: Cost): Action | null
   return null;
 }
 
-/** Lower is a more attractive target. */
-function scoreTarget(s: GameState, hurt: (defense: number) => number, t: EntityRef): number {
-  // An alien that this weapon can actually hurt comes before everything.
-  if (t.kind === 'alien') return hurt(ALIENS[alienById(s, t.id)?.key ?? 'chloe'].defense) > 0 ? 0 : 9;
-  if (t.kind === 'spider') return hurt(SPIDERLING.defense) > 0 ? 0.5 : 9;
+/** What a target is, for the weapons that hit some things twice as hard. */
+const kindOf = (u: Unit): BonusClass | null => {
+  const family = UNITS[u.key].family;
+  return family === 'soldier' || family === 'tank' ? family : null;
+};
+
+/** How many of the other side's units stand on the four tiles in line with a unit: what a splash would catch besides it. */
+function crowdAround(s: GameState, u: Unit): number {
+  const idx = new BoardIndex(s);
+  let n = 0;
+  for (const [dx, dy] of DIRS4) {
+    const other = idx.ground.get(key(u.x + dx, u.y + dy));
+    if (other && other.owner !== u.owner) n++;
+  }
+  return n;
+}
+
+/**
+ * Lower is a more attractive target. On the low game anything that can be
+ * killed this shot comes first and everything else is much of a muchness. On
+ * the high game the dearest kill comes first of all, and then what the weapon
+ * hurts most: its own particular prey, something already hurt, and something
+ * with the enemy packed round it for the splash.
+ */
+function scoreTarget(s: GameState, hurt: (defense: number, cls: TargetClass, vs: BonusClass | null) => number, t: EntityRef, splash = false): number {
+  // An alien that this weapon can actually hurt comes before everything: one overhead only counts for a weapon that reaches the air.
+  if (t.kind === 'alien') {
+    const a = alienById(s, t.id);
+    if (!a) return 9;
+    const d = alienStats(a);
+    return hurt(d.defense, d.flies ? 'air' : 'ground', 'alien') > 0 ? 0 : 9;
+  }
+  if (t.kind === 'brood') {
+    const m = minionById(s, t.id);
+    return m && hurt(minionDef(m).defense, 'ground', 'alien') > 0 ? 0.5 : 9;
+  }
+  // A house or tower the enemy holds: worth knocking down for the soldiers inside it.
+  if (t.kind === 'city') return 3.6;
   if (t.kind === 'building') {
     const hit = buildingById(s, t.id);
     if (!hit) return 9;
@@ -138,14 +246,18 @@ function scoreTarget(s: GameState, hurt: (defense: number) => number, t: EntityR
   const hit = unitById(s, t.id);
   if (!hit) return 9;
   // The ground a unit stands on counts towards its armour.
-  return hurt(defenseOf(s, hit.unit)) >= hit.unit.hp ? 1 : 3;
+  const dealt = hurt(defenseOf(s, hit.unit), UNITS[hit.unit.key].unitClass, kindOf(hit.unit));
+  const hard = isHard(s);
+  if (dealt >= hit.unit.hp) return hard ? 1 - Math.min(0.4, SCORE_UNIT[hit.unit.key] * 0.003) : 1;
+  if (!hard) return 3;
+  return 2 + hit.unit.hp * 0.02 - Math.min(0.5, dealt * 0.02) - (splash ? crowdAround(s, hit.unit) * 0.12 : 0);
 }
 
-function bestTarget(s: GameState, hurt: (defense: number) => number, list: EntityRef[]): EntityRef {
+function bestTarget(s: GameState, hurt: (defense: number, cls: TargetClass, vs: BonusClass | null) => number, list: EntityRef[], splash = false): EntityRef {
   let best = list[0];
   let bestScore = Infinity;
   for (const t of list) {
-    const sc = scoreTarget(s, hurt, t);
+    const sc = scoreTarget(s, hurt, t, splash);
     if (sc < bestScore) {
       bestScore = sc;
       best = t;
@@ -182,9 +294,10 @@ interface March {
 /** The tile a unit should head for. */
 function pickGoal(s: GameState, p: PlayerState, u: Unit): March | null {
   const d = UNITS[u.key];
-  // An alien's bounty is worth a detour, if this unit can actually hurt it.
+  // An alien's bounty is worth a detour, if this unit can actually hurt it: one overhead only for a weapon that reaches the air.
   for (const a of s.aliens) {
-    if (cheb(u, a) <= 7 && damageOf(baseStats(u.key), ALIENS[a.key].defense) > 0) return { pos: { x: a.x, y: a.y } };
+    const d = alienStats(a);
+    if (cheb(u, a) <= 7 && damageOf(baseStats(u.key, rankOf(u)), d.defense, d.flies ? 'air' : 'ground', 'alien') > 0) return { pos: { x: a.x, y: a.y } };
   }
   const hq = hqOf(p);
   const home = hq ? buildingCenter(hq) : { x: u.x, y: u.y };
@@ -239,7 +352,7 @@ function advance(s: GameState, p: PlayerState, u: Unit): Action | null {
   // The route only looks at fixed obstacles and terrain (a foot soldier heads
   // for the bridge rather than the river bank); the steps actually taken this
   // turn are checked against the units on the ground right now.
-  const path = route(s, u, target, range, mode);
+  const path = routeOf(s, u, target, range, mode);
   if (!path?.length) return null;
   const reach = reachable(new BoardIndex(s), s, u, mode, d.move, u.id);
   for (let i = Math.min(d.move, path.length) - 1; i >= 0; i--) {
@@ -249,6 +362,32 @@ function advance(s: GameState, p: PlayerState, u: Unit): Action | null {
   return null;
 }
 
+/**
+ * The high game raises its troops in rank once it is comfortably off. First
+ * steps come before second ones (half again as much strength for two thirds
+ * of the price), and among those the unit that hits hardest, a rank being a
+ * share of what is there. A step is only taken with half as much again its
+ * price to spare besides whatever the plan is saving up for, so that it never
+ * comes out of a building; the second step, which costs half as much again the
+ * first, waits for twice its price to spare.
+ */
+export function raiseTroops(p: PlayerState, reserve: Cost): Action | null {
+  let best: Unit | null = null;
+  let pick = Infinity;
+  for (const u of p.units) {
+    const rank = rankOf(u);
+    if (rank >= RANKS.length || !withinBudget(p, scale(promoteCost(u.key, rank), rank === 1 ? 1.5 : 2), reserve)) continue;
+    const hit = rankStats(u.key, rank).attack * UNITS[u.key].shots;
+    // Lower rank first, then the harder hitter: read as one number, smaller is better.
+    const here = rank * 1000 - hit;
+    if (here < pick) {
+      pick = here;
+      best = u;
+    }
+  }
+  return best ? { type: 'PROMOTE', unitId: best.id } : null;
+}
+
 function combat(s: GameState, p: PlayerState): Action | null {
   // Shoot first with whatever has something to shoot at.
   for (const u of p.units) {
@@ -256,7 +395,7 @@ function combat(s: GameState, p: PlayerState): Action | null {
     const list = attackTargets(s, { kind: 'unit', id: u.id });
     if (list.length) {
       const st = statsOf(s, u);
-      return { type: 'ATTACK', source: { kind: 'unit', id: u.id }, target: bestTarget(s, (def) => damageOf(st, def), list) };
+      return { type: 'ATTACK', source: { kind: 'unit', id: u.id }, target: bestTarget(s, (def, cls, vs) => damageOf(st, def, cls, vs), list, st.splash === 'cross') };
     }
   }
   for (const b of p.buildings) {
@@ -301,14 +440,18 @@ export function aiDecide(s: GameState, pid: number): Action | null {
   //    AI would pour every coin into buildings and field nothing until turn 10.
   const armyThisTurn = (p.producedThisTurn.barracks ?? 0) + (p.producedThisTurn.warFactory ?? 0) + (p.producedThisTurn.airport ?? 0);
   const quota = factories >= 2 ? 2 : 1;
+  // An aircraft the computer is waiting to afford is saved up for: nothing else eats into half of what it costs.
+  const powder: Cost = {};
+  const wanted = planeWanted(s, p);
+  if (wanted) for (const k of RES_KEYS) powder[k] = Math.ceil((UNITS[wanted].cost[k] ?? 0) / 2);
   if (countBuilding(p, 'barracks') > 0 && armyThisTurn < quota) {
-    const order = produceUnit(s, p, {});
+    const order = produceUnit(s, p, powder);
     if (order) return order;
   }
 
   // 4. Construction, most urgent first.
   const plan = goals(s, p);
-  const reserve: Cost = {};
+  const reserve: Cost = { ...powder };
   for (const g of plan) {
     const cost = BUILDINGS[g.key].levels[0].cost;
     if (canBuild(s, p, g.key) === null) return { type: 'BUILD', key: g.key };
@@ -331,6 +474,12 @@ export function aiDecide(s: GameState, pid: number): Action | null {
     }
   }
 
-  // 6. Whatever is left goes into more units, then orders.
+  // 6. On the high game, what is left over raises the troops in rank; the low game leaves them as they were mustered.
+  if (isHard(s)) {
+    const order = raiseTroops(p, reserve);
+    if (order) return order;
+  }
+
+  // 7. Whatever is left goes into more units, then orders.
   return produceUnit(s, p, reserve) ?? combat(s, p);
 }

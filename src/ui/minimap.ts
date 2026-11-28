@@ -1,5 +1,6 @@
-import { terrainAt, zoneSize } from '../game/board';
-import { ALIENS, RESOURCES, UNITS } from '../game/data';
+import { holderOf, terrainAt, zoneSize } from '../game/board';
+import { RESOURCES, UNITS } from '../game/data';
+import { alienStats } from '../game/engine';
 import type { GameState } from '../game/types';
 import { TERRAIN_COLORS } from '../render/palette';
 
@@ -12,6 +13,7 @@ interface Bounds {
 
 const CSS_SIZE = 176;
 const SPIDER = '#e879f9';
+const BONE = '#e7e5d8';
 
 /** The terrain of the whole board on a square canvas `side` pixels wide. Returns the size of one tile. */
 export function paintGround(g: CanvasRenderingContext2D, s: GameState, side: number): number {
@@ -55,6 +57,12 @@ export function paintForces(g: CanvasRenderingContext2D, s: GameState, px: numbe
     g.arc(X(node.x + 0.5), Y(node.y + 0.5), px * 0.36, 0, Math.PI * 2);
     g.fill();
   }
+  // The houses and towers of the map: grey while nobody holds them, the holder's colour once someone does.
+  for (const c of s.city ?? []) {
+    const holder = holderOf(s, c);
+    g.fillStyle = holder ? holder.color : '#cbd5e1';
+    g.fillRect(X(c.x) + px * 0.22, Y(c.y) + px * 0.22, px * 0.56, px * 0.56);
+  }
   // Buildings, then the units parked on top of them.
   for (const p of s.players) {
     for (const b of p.buildings) {
@@ -70,6 +78,8 @@ export function paintForces(g: CanvasRenderingContext2D, s: GameState, px: numbe
   }
   for (const p of s.players) {
     for (const u of p.units) {
+      // A soldier inside a building is part of its square, not a dot of its own.
+      if (u.inside !== undefined) continue;
       const air = UNITS[u.key].unitClass === 'air';
       g.beginPath();
       g.arc(X(u.x + 0.5), Y(u.y + 0.5), px * 0.34, 0, Math.PI * 2);
@@ -87,7 +97,8 @@ export function paintForces(g: CanvasRenderingContext2D, s: GameState, px: numbe
   for (const a of s.aliens) {
     g.beginPath();
     g.arc(X(a.x + 0.5), Y(a.y + 0.5), px * 0.62, 0, Math.PI * 2);
-    g.fillStyle = ALIENS[a.key].color;
+    // A dragon that was a dinosaur a moment ago has its own colour.
+    g.fillStyle = alienStats(a).color;
     g.fill();
     g.strokeStyle = '#ffffff';
     g.lineWidth = Math.max(1, px * 0.12);
@@ -96,7 +107,7 @@ export function paintForces(g: CanvasRenderingContext2D, s: GameState, px: numbe
   for (const b of s.brood) {
     g.beginPath();
     g.arc(X(b.x + 0.5), Y(b.y + 0.5), px * 0.24, 0, Math.PI * 2);
-    g.fillStyle = SPIDER;
+    g.fillStyle = b.kind === 'skeleton' ? BONE : SPIDER;
     g.fill();
   }
 }

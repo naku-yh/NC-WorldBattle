@@ -1,11 +1,13 @@
-import { ZONE_SIZE } from './data';
+import { CITY_CLEAR, CITY_COUNT, ZONE_SIZE } from './data';
 import { RALLY_LOCAL, cornersOf, inBoard, key, laneTiles, NODE_LAYOUT, toWorld, zoneTiles } from './board';
 import type { Rng } from './rng';
-import type { Pt, ResourceKey, Terrain, Waterway } from './types';
+import type { CityKind, Pt, ResourceKey, Terrain, Waterway } from './types';
 
 export interface MapPlan {
   terrain: Terrain[];
   waterway: Waterway;
+  /** The houses and towers standing about the larger maps, for soldiers to move into; none elsewhere. */
+  city: Array<{ kind: CityKind; x: number; y: number }>;
 }
 
 /** Water tiles kept between the waterway's two bridges ("at least five tiles apart"). */
@@ -16,6 +18,44 @@ const cheb = (a: Pt, b: Pt): number => Math.max(Math.abs(a.x - b.x), Math.abs(a.
 
 export function plainTerrain(n: number): Terrain[] {
   return new Array<Terrain>(n * n).fill('plain');
+}
+
+/**
+ * Scatters houses and towers over the open ground, once the woods and hills
+ * are down. Each stands on plain ground with no water in the eight tiles
+ * round it, well clear of every base zone (the ring an upgraded base adds
+ * counted in), and never touching another.
+ */
+function layOutTown(rng: Rng, t: Terrain[], n: number): MapPlan['city'] {
+  const want = CITY_COUNT[n];
+  if (!want) return [];
+  const at = (x: number, y: number): number => y * n + x;
+  // A tile is far enough from all four zones exactly when it lies in the cross that runs through the middle of the board.
+  const lo = ZONE_SIZE + CITY_CLEAR;
+  const hi = n - 1 - lo;
+  const inTheOpen = (x: number, y: number): boolean => (x >= lo && x <= hi) || (y >= lo && y <= hi);
+  const clearOfWater = (x: number, y: number): boolean => {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (!inBoard(x + dx, y + dy, n)) continue;
+        const kind = t[at(x + dx, y + dy)];
+        if (kind === 'water' || kind === 'lake' || kind === 'bridge') return false;
+      }
+    }
+    return true;
+  };
+  const out: MapPlan['city'] = [];
+  const put = (kind: CityKind, count: number): void => {
+    for (let tries = 0; tries < 800 && out.filter((c) => c.kind === kind).length < count; tries++) {
+      const x = rng.int(0, n - 1);
+      const y = rng.int(0, n - 1);
+      if (t[at(x, y)] !== 'plain' || !inTheOpen(x, y) || !clearOfWater(x, y) || out.some((c) => cheb(c, { x, y }) < 2)) continue;
+      out.push({ kind, x, y });
+    }
+  };
+  put('house', want.house);
+  put('tower', want.tower);
+  return out;
 }
 
 /** Every tile reachable from `start` without setting foot in water. */
@@ -175,5 +215,5 @@ export function generateTerrain(rng: Rng, n: number, seated: number[]): MapPlan 
   scatter(Math.round((n * n) / 58), 'forest', 3, 7);
   scatter(Math.round((n * n) / 105), 'hill', 2, 4);
 
-  return { terrain: t, waterway };
+  return { terrain: t, waterway, city: layOutTown(rng, t, n) };
 }

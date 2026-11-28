@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { aiDecide } from '../game/ai';
 import { toWorld } from '../game/board';
-import { BOARD_SIZE, BUILDINGS, PLAYER_COLORS, PLAYER_NAMES, UNITS } from '../game/data';
-import { attackTargets, buildSpots, buildingById, canBuild, createGame, moveRange, placementError, unitById } from '../game/engine';
+import { BOARD_SIZE, BUILDINGS, PLAYER_COLORS, PLAYER_NAMES, RANKS, UNITS } from '../game/data';
+import { attackTargets, buildSpots, buildingById, canBuild, canPromote, canStillAct, cityById, createGame, moveRange, placementError, rankOf, unitById } from '../game/engine';
 import type { Action, BuildingKey, EntityRef, GameConfig, GameEvent, GameState, PlayerState, Pt } from '../game/types';
 import { HIGHLIGHT, VIEW_DIR, Scene, worldOf } from '../render/scene';
 import type { GameView } from '../render/view';
@@ -72,6 +72,8 @@ export class Controller {
   private scores: Scores;
   private tab: Tab = 'build';
   private sel: Sel | null = null;
+  /** Of the soldiers in a selected building, the one that fires next. */
+  private gunner: number | null = null;
   private inspect: EntityRef | null = null;
   /** The next drawing of the sidebar is to scroll to the producer that was just clicked on the board. */
   private scrollToProducer = false;
@@ -93,6 +95,7 @@ export class Controller {
     size: BOARD_SIZE,
     names: [...PLAYER_NAMES],
     colors: [...PLAYER_COLORS],
+    difficulty: 'high',
   };
   /** The match is paused: the picture stands still and no order goes through. */
   private paused = false;
@@ -135,6 +138,12 @@ export class Controller {
         this.render();
       },
       cancelPlace: () => this.cancelPlace(),
+      leave: (id) => void this.dispatch({ type: 'LEAVE', cityId: id }),
+      promote: (id) => this.promoteUnit(id),
+      pick: (id) => {
+        this.gunner = id;
+        this.render();
+      },
     });
     this.home = new Home(m.home, { newGame: () => this.showSetup(), load: () => this.showLoads() });
     this.menu = new PauseMenu(this.overlays, {
@@ -173,7 +182,10 @@ export class Controller {
       canvas.style.cursor = view ? 'pointer' : 'default';
     });
     canvas.addEventListener('pointerleave', () => {
-      if (this.placing) this.scene.setGhost([], true);
+      if (this.placing) {
+        this.scene.setGhost([], true);
+        this.view.setPlace(null, null, 0);
+      }
       this.view.setHover(null);
     });
     canvas.addEventListener('contextmenu', (e) => {
@@ -308,6 +320,7 @@ export class Controller {
       size: state.boardSize,
       names: [0, 1, 2, 3].map((i) => state.players[i]?.name ?? PLAYER_NAMES[i]),
       colors: [0, 1, 2, 3].map((i) => state.players[i]?.color ?? PLAYER_COLORS[i]),
+      difficulty: state.difficulty,
     };
     this.tab = 'build';
     this.turnKey = '';
@@ -348,6 +361,7 @@ export class Controller {
       colors: this.setup.colors.slice(0, this.setup.count),
       totalTurns: this.setup.turns,
       size: this.setup.size,
+      difficulty: this.setup.difficulty,
     });
   }
 
@@ -593,13 +607,53 @@ export class Controller {
     return kind === 'unit' ? unitById(s, id)?.owner.id === p.id : buildingById(s, id)?.owner.id === p.id;
   }
 
+  /** The current player's soldiers inside the building that have not fired this turn. */
+  private gunners(cityId: number): number[] {
+    const s = this.state;
+    const c = s ? cityById(s, cityId) : null;
+    if (!s || !c || s.phase !== 'player') return [];
+    return c.occupants.filter((id) => {
+      const hit = unitById(s, id);
+      return !!hit && hit.owner.id === s.currentPlayer && !hit.unit.attackUsed && UNITS[hit.unit.key].attack > 0;
+    });
+  }
+
+  /** Everything the selection can shoot at now. A held building shoots through whichever of its soldiers still can. */
+  private targets(): EntityRef[] {
+    const s = this.state;
+    if (!s || !this.sel) return [];
+    if (this.sel.kind !== 'city') return attackTargets(s, { kind: this.sel.kind, id: this.sel.id });
+    const out: EntityRef[] = [];
+    for (const id of this.gunners(this.sel.id)) out.push(...attackTargets(s, { kind: 'unit', id }));
+    return out;
+  }
+
+  /** Orders the selection to fire at `target`: a building through the soldier picked for it, or failing that any inside that can reach. */
+  private fire(target: EntityRef): void {
+    const s = this.state;
+    if (!s || !this.sel) return;
+    if (this.sel.kind !== 'city') {
+      void this.dispatch({ type: 'ATTACK', source: { kind: this.sel.kind, id: this.sel.id }, target });
+      return;
+    }
+    for (const id of [this.gunner, ...this.gunners(this.sel.id)]) {
+      if (id === null) continue;
+      if (attackTargets(s, { kind: 'unit', id }).some((t) => t.kind === target.kind && t.id === target.id)) {
+        void this.dispatch({ type: 'ATTACK', source: { kind: 'unit', id }, target });
+        return;
+      }
+    }
+  }
+
   /** Still has a move or a shot left this turn. */
-  private commandable(kind: 'unit' | 'building', id: number, p: PlayerState): boolean {
+  private commandable(kind: Sel['kind'], id: number, p: PlayerState): boolean {
     const s = this.state!;
+    if (kind === 'city') return p.id === s.currentPlayer && this.gunners(id).length > 0;
     if (!this.own(kind, id, p)) return false;
     if (kind === 'unit') {
-      const u = unitById(s, id)!.unit;
-      return !u.moveUsed || (!u.attackUsed && UNITS[u.key].attack > 0);
+      const hit = unitById(s, id);
+      // A soldier inside a building is commanded through the building, not on its own.
+      return !!hit && hit.unit.inside === undefined && canStillAct(hit.unit);
     }
     const b = buildingById(s, id)!.building;
     const lv = BUILDINGS[b.key].levels[b.level - 1];
@@ -616,14 +670,19 @@ export class Controller {
       return;
     }
     if (view) {
-      if ((view.kind === 'unit' || view.kind === 'building') && this.commandable(view.kind, view.id, p)) {
+      if ((view.kind === 'unit' || view.kind === 'building' || view.kind === 'city') && this.commandable(view.kind, view.id, p)) {
         this.select({ kind: view.kind, id: view.id });
         return;
       }
       const target: EntityRef = { kind: view.kind, id: view.id };
-      if (this.sel && attackTargets(s, this.sel).some((t) => t.kind === target.kind && t.id === target.id)) {
-        this.dispatch({ type: 'ATTACK', source: this.sel, target });
+      if (this.sel && this.targets().some((t) => t.kind === target.kind && t.id === target.id)) {
+        this.fire(target);
         return;
+      }
+      // A house or tower stands over its tile, so the tile under the pointer is the one behind it: the step, if there is one to take, is through its own door.
+      if (view.kind === 'city') {
+        const house = cityById(s, view.id);
+        if (house && this.stepTo({ x: house.x, y: house.y })) return;
       }
       // Anything else is only there to be looked at. One of the player's own producers, though,
       // is where units come from: the "生产" page opens on its line.
@@ -636,15 +695,42 @@ export class Controller {
       this.render();
       return;
     }
-    if (this.sel && this.sel.kind === 'unit' && tile && moveRange(s, this.sel.id).some((m) => m.x === tile.x && m.y === tile.y)) {
-      this.dispatch({ type: 'MOVE', unitId: this.sel.id, x: tile.x, y: tile.y });
-      return;
-    }
+    if (this.stepTo(tile)) return;
     // Nothing to command here: show what the ground is like instead.
     this.inspect = null;
     this.select(null);
     this.lookAtTile(tile);
     this.render();
+  }
+
+  /**
+   * The step up to the next rank for one of the player's own units: a sheet
+   * with its insignia and the next one, what each figure comes to, and the
+   * price. Nothing is paid until the player says so on it.
+   */
+  private promoteUnit(unitId: number): void {
+    const s = this.state;
+    if (!s || !this.humanTurn()) return;
+    const p = s.players[s.currentPlayer];
+    const u = p.units.find((x) => x.id === unitId);
+    if (!u) return;
+    const why = canPromote(p, unitId);
+    if (why === '已是最高军衔') {
+      this.overlays.toast(why, 'bad');
+      return;
+    }
+    this.overlays.promotion(s, u, () => {
+      // Short of money the sheet says so and will not let it through; anything else the rules have to say is said here.
+      if (this.dispatch({ type: 'PROMOTE', unitId })) this.overlays.toast(`${UNITS[u.key].name} 晋升为${RANKS[rankOf(u) - 1].name}`, 'good');
+    });
+  }
+
+  /** Sends the selected unit to `tile` if it is one it may still move to this turn. True if it did. */
+  private stepTo(tile: Pt | null): boolean {
+    if (!tile || !this.state || !this.sel || this.sel.kind !== 'unit') return false;
+    if (!moveRange(this.state, this.sel.id).some((m) => m.x === tile.x && m.y === tile.y)) return false;
+    this.dispatch({ type: 'MOVE', unitId: this.sel.id, x: tile.x, y: tile.y });
+    return true;
   }
 
   /** The building `ref` points at, if it is one of the current player's own producers: the buildings the "生产" page lists units under. */
@@ -664,6 +750,7 @@ export class Controller {
 
   private select(ref: Sel | null): void {
     this.sel = ref;
+    this.gunner = ref?.kind === 'city' ? (this.gunners(ref.id)[0] ?? null) : null;
     if (ref) {
       this.inspect = null;
       this.lookAtTile(null);
@@ -679,9 +766,13 @@ export class Controller {
       const p = s.players[s.currentPlayer];
       if (s.phase !== 'player' || !p || !this.commandable(this.sel.kind, this.sel.id, p)) this.sel = null;
     }
+    // The soldier picked to fire for a building is always one that still can.
+    if (this.sel?.kind === 'city') {
+      if (!this.gunners(this.sel.id).includes(this.gunner ?? -1)) this.gunner = this.gunners(this.sel.id)[0] ?? null;
+    } else this.gunner = null;
     if (this.placing && !this.humanTurn()) this.clearPlace();
     this.view.selected = this.sel ? `${this.sel.kind}:${this.sel.id}` : null;
-    if (this.sel && s) this.view.highlight(moveRange(s, this.sel.id), attackTargets(s, this.sel));
+    if (this.sel && s) this.view.highlight(this.sel.kind === 'unit' ? moveRange(s, this.sel.id) : [], this.targets());
     else if (this.placing) this.view.highlightTiles(this.placeTiles(), HIGHLIGHT.build);
     else this.view.highlightTiles([], HIGHLIGHT.build);
   }
@@ -719,6 +810,7 @@ export class Controller {
   private clearPlace(): void {
     this.placing = null;
     this.scene.setGhost([], true);
+    this.view.setPlace(null, null, 0);
     this.view.highlightTiles([], HIGHLIGHT.build);
   }
 
@@ -747,12 +839,20 @@ export class Controller {
     return buildSpots(s, p, this.placing!).find((a) => tile.x >= a.x && tile.x < a.x + def.w && tile.y >= a.y && tile.y < a.y + def.h) ?? null;
   }
 
-  /** Ghost of the footprint that a click here would create. */
+  /**
+   * The footprint a click here would create, and the building itself over it,
+   * half transparent: where a click would put it, or else on the tile under
+   * the pointer, so that a wrong spot shows what is wrong with it.
+   */
   private previewPlace(tile: Pt | null): void {
     const def = this.placing ? BUILDINGS[this.placing] : null;
-    if (!def) return;
+    const s = this.state;
+    if (!def || !s) return;
     const anchor = tile ? this.anchorFor(tile) : null;
     this.scene.setGhost(anchor ? footprintOf(def.w, def.h, anchor) : tile ? footprintOf(def.w, def.h, tile) : [], !!anchor);
+    const p = s.players[s.currentPlayer];
+    const c = s.corners[p.corner];
+    this.view.setPlace(this.placing, anchor ?? tile, parseInt(p.color.slice(1), 16), def.w !== def.h ? (c.dy === 1 ? 0 : Math.PI) : Math.atan2(c.dx, -c.dy));
     this.view.setHover(tile);
   }
 
@@ -774,7 +874,8 @@ export class Controller {
     if (!s || !this.humanTurn()) return;
     const p = s.players[s.currentPlayer];
     const pool: Sel[] = [
-      ...p.units.filter((u) => !u.moveUsed || (!u.attackUsed && UNITS[u.key].attack > 0)).map((u) => ({ kind: 'unit' as const, id: u.id })),
+      ...p.units.filter((u) => u.inside === undefined && canStillAct(u)).map((u) => ({ kind: 'unit' as const, id: u.id })),
+      ...s.city.filter((c) => this.gunners(c.id).length > 0).map((c) => ({ kind: 'city' as const, id: c.id })),
       ...p.buildings
         .filter((b) => {
           const lv = BUILDINGS[b.key].levels[b.level - 1];
@@ -816,12 +917,15 @@ export class Controller {
       inspect: this.inspect,
       tile: this.tile,
       placing: this.placing,
+      gunner: this.gunner,
       focusProducer: this.tab === 'produce' ? this.producerOf(this.inspect) : null,
       scrollProducer: this.scrollToProducer,
       humanTurn: this.humanTurn(),
       speed: this.speed,
     });
     this.scrollToProducer = false;
+    // What is ringed on the board is what the card at the bottom is about: the selection first, and otherwise whatever is being looked at.
+    this.view.showReach(this.sel ?? this.inspect);
     // The gathering panel covers a strip of the picture when it is up: slide the board clear of it.
     this.scene.setSideInset(harvesting ? HARVEST_INSET : 0);
     this.minimap.update(this.store.state);

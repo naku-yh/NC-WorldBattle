@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { AlienKey, BuildingKey, ResourceKey, UnitKey } from '../game/types';
+import type { AlienKey, BuildingKey, CityKind, MinionKind, ResourceKey, UnitKey } from '../game/types';
 
 /** A part that moves by itself, just for show. */
 export interface Motion {
@@ -32,6 +32,8 @@ export interface Model {
   /** Lit parts, dark while the building has no power. */
   lamps?: THREE.MeshStandardMaterial[];
   vents?: Vent[];
+  /** Where a flag planted on it stands, in the model's own coordinates: on the roof itself, masts and chimneys aside. */
+  flagAt?: [number, number, number];
 }
 
 export interface TruckModel {
@@ -339,6 +341,67 @@ function fighter(color: number): Model {
   return { group: g, heads: [], height: 0.16 };
 }
 
+/** A special-forces soldier: broader, in a visored helmet, with a long rifle. */
+function commando(color: number): Model {
+  const g = new THREE.Group();
+  const dark = shade(color, 0.5);
+  add(g, cap(0.09, 0.2), mat(color), 0, 0.22, 0);
+  add(g, box(0.2, 0.1, 0.14), mat(dark), 0, 0.3, -0.02); // shoulders
+  add(g, sph(0.088), mat(dark), 0, 0.41, 0); // helmet
+  add(g, box(0.14, 0.03, 0.02), glow(0x7dd3fc, 1.2), 0, 0.41, 0.082); // visor
+  add(g, box(0.19, 0.05, 0.13), mat(shade(color, 0.7)), 0, 0.29, -0.01); // pack
+  add(g, box(0.028, 0.028, 0.36), mat(DARK), 0.08, 0.27, 0.13);
+  add(g, box(0.04, 0.05, 0.1), mat(GUNMETAL, { metal: 0.6 }), 0.08, 0.3, 0.2);
+  add(g, box(0.06, 0.06, 0.05), mat(DARK), 0.08, 0.24, 0.03); // magazine
+  add(g, box(0.045, 0.16, 0.045), mat(dark), -0.055, 0.08, 0);
+  add(g, box(0.045, 0.16, 0.045), mat(dark), 0.055, 0.08, 0);
+  return { group: g, heads: [], height: 0.5 };
+}
+
+/** A walking battle mech: an armoured torso on two legs, a gun on each arm and a visored head. The torso turns towards what it shoots at. */
+function mech(color: number): Model {
+  const g = new THREE.Group();
+  const plate = mat(color, { rough: 0.5, metal: 0.35 });
+  const dark = mat(shade(color, 0.55), { metal: 0.4 });
+  for (const side of [-1, 1]) {
+    add(g, box(0.1, 0.22, 0.12), dark, side * 0.11, 0.36, 0); // thigh
+    add(g, box(0.085, 0.24, 0.1), plate, side * 0.11, 0.14, 0.01); // shin
+    add(g, box(0.12, 0.045, 0.2), mat(TREAD), side * 0.11, 0.022, 0.03); // foot
+  }
+  add(g, box(0.2, 0.08, 0.14), dark, 0, 0.49, 0); // hips
+  const h = new THREE.Group();
+  h.userData.live = true;
+  add(h, box(0.3, 0.24, 0.2), plate, 0, 0.13, 0);
+  add(h, box(0.22, 0.06, 0.02), glow(0x7dd3fc, 1.1), 0, 0.16, 0.101); // chest lights
+  add(h, sph(0.075), dark, 0, 0.31, 0.02);
+  add(h, box(0.12, 0.03, 0.02), glow(0xfca5a5, 1.3), 0, 0.31, 0.094); // visor
+  for (const side of [-1, 1]) {
+    add(h, box(0.07, 0.16, 0.09), plate, side * 0.2, 0.2, 0); // shoulder
+    add(h, cyl(0.028, 0.028, 0.34, 8), mat(GUNMETAL, { metal: 0.6, rough: 0.4 }), side * 0.2, 0.14, 0.2, [Math.PI / 2, 0, 0]); // gun
+  }
+  h.position.y = 0.53;
+  g.add(h);
+  return done({ group: g, heads: [h], height: 0.9 });
+}
+
+/** A bomber: wider and heavier than a fighter, an engine on each wing and a glass nose. */
+function bomber(color: number): Model {
+  const g = new THREE.Group();
+  const skin = mat(color, { rough: 0.42, metal: 0.4 });
+  add(g, cap(0.085, 0.46), skin, 0, 0, 0, [Math.PI / 2, 0, 0]);
+  add(g, cone(0.085, 0.14, 10), mat(0xd6efff, { emissive: 0x38bdf8, glow: 0.5, rough: 0.1 }), 0, 0, 0.39, [Math.PI / 2, 0, 0]);
+  add(g, box(0.82, 0.025, 0.24), skin, 0, 0, 0.02);
+  add(g, box(0.3, 0.02, 0.12), mat(shade(color, 0.85)), 0, 0.01, -0.26); // tail plane
+  add(g, box(0.02, 0.2, 0.16), mat(shade(color, 0.6)), 0, 0.1, -0.3); // fin
+  const engine = mat(0xffb27a, { emissive: 0xf97316, glow: 1.6 });
+  for (const x of [-0.27, 0.27]) {
+    add(g, cyl(0.05, 0.055, 0.22, 10), mat(shade(color, 0.7), { metal: 0.4 }), x, -0.005, 0.1, [Math.PI / 2, 0, 0]);
+    add(g, cyl(0.035, 0.035, 0.03, 8), engine, x, -0.005, -0.02, [Math.PI / 2, 0, 0]);
+  }
+  add(g, box(0.1, 0.03, 0.2), mat(DARK), 0, -0.085, 0.02); // bomb bay
+  return { group: g, heads: [], height: 0.22 };
+}
+
 export function buildUnit(key: UnitKey, color: number): Model {
   switch (key) {
     case 'truck':
@@ -349,6 +412,10 @@ export function buildUnit(key: UnitKey, color: number): Model {
       return done(soldier(color, 'sniper'));
     case 'atSoldier':
       return done(soldier(color, 'at'));
+    case 'specOps':
+      return done(commando(color));
+    case 'mech':
+      return mech(color);
     case 'tank': {
       const g = tankBody(color);
       const h = turretHead(color, 1, 0.4, 0.022, false, (head) => {
@@ -433,6 +500,8 @@ export function buildUnit(key: UnitKey, color: number): Model {
     }
     case 'fighter':
       return done(fighter(color));
+    case 'bomber':
+      return done(bomber(color));
   }
 }
 
@@ -966,6 +1035,59 @@ export function buildBuilding(key: BuildingKey, level: number, color: number): M
 }
 
 // ---------------------------------------------------------------------------
+// The houses and towers of the larger maps
+// ---------------------------------------------------------------------------
+
+/** A one-storey house: rendered walls under a tiled roof, a door, two lit windows and a chimney. */
+function house(): Model {
+  const g = new THREE.Group();
+  const wall = mat(0xd9c7a3, { rough: 0.9 });
+  const glass = glow(0xffe2a0, 0.55);
+  add(g, box(0.8, 0.04, 0.8), mat(0x9c9484, { rough: 0.95 }), 0, 0.02, 0); // path and yard
+  add(g, box(0.66, 0.34, 0.56), wall, 0, 0.21, 0);
+  add(g, box(0.76, 0.05, 0.66), mat(0xb08968, { rough: 0.9 }), 0, 0.405, 0); // eaves
+  add(g, gable(0.74, 0.24, 0.6), mat(0xa14d3a, { rough: 0.85 }), 0, 0.43, 0);
+  add(g, box(0.14, 0.22, 0.02), mat(DARK), 0, 0.15, 0.285); // door
+  add(g, box(0.16, 0.13, 0.016), mat(DARK), -0.2, 0.27, 0.285);
+  add(g, box(0.136, 0.11, 0.01), glass, -0.2, 0.27, 0.293);
+  add(g, box(0.16, 0.13, 0.016), mat(DARK), 0.2, 0.27, 0.285);
+  add(g, box(0.136, 0.11, 0.01), glass, 0.2, 0.27, 0.293);
+  add(g, box(0.08, 0.18, 0.08), mat(0x8a6552, { rough: 0.9 }), 0.2, 0.57, -0.12); // chimney
+  // The flag goes on the ridge, at its front end, clear of the chimney.
+  return lit({ group: g, heads: [], height: 0.68, flagAt: [0, 0.67, 0.18] });
+}
+
+/** A tower: six storeys of lit glass between concrete floors, a lift room on the roof and a mast with a beacon. */
+function towerBlock(): Model {
+  const g = new THREE.Group();
+  const stone = mat(0xb9bec8, { rough: 0.85 });
+  const glass = glow(0xbfe3ff, 0.5);
+  add(g, box(0.8, 0.06, 0.8), mat(0x8b8f98, { rough: 0.95 }), 0, 0.03, 0);
+  for (let i = 0; i < 6; i++) {
+    add(g, box(0.62, 0.1, 0.62), stone, 0, 0.11 + i * 0.2, 0);
+    add(g, box(0.6, 0.1, 0.6), glass, 0, 0.21 + i * 0.2, 0);
+  }
+  add(g, box(0.66, 0.05, 0.66), stone, 0, 1.315, 0); // roof slab
+  add(g, box(0.26, 0.14, 0.22), mat(0x9aa0aa, { rough: 0.9 }), 0, 1.41, -0.1); // lift room
+  mast(g, 0, 1.33, 0.2, 0.36);
+  add(g, box(0.16, 0.2, 0.02), mat(DARK), 0, 0.16, 0.312); // doorway
+  // The flag stands on the roof slab, front right, clear of the lift room and of the mast.
+  return lit({ group: g, heads: [], height: 1.74, hitH: 1.4, flagAt: [0.24, 1.34, 0.22] });
+}
+
+/** One of the buildings that stand about the larger maps, for soldiers to move into. */
+export function buildCity(kind: CityKind): Model {
+  return kind === 'house' ? house() : towerBlock();
+}
+
+/** A flag on its pole, to fly over a building whose soldiers hold it. The pole stands at the group's origin. */
+export function buildFlag(color: number): THREE.Group {
+  const g = new THREE.Group();
+  flag(g, color, 0, 0, 0);
+  return g;
+}
+
+// ---------------------------------------------------------------------------
 // Resource nodes
 // ---------------------------------------------------------------------------
 
@@ -1324,8 +1446,8 @@ function ghost(): Model {
   return done({ group: g, heads: [], height: 0.82 });
 }
 
-/** The model of whichever alien turned up. */
-export function buildAlien(key: AlienKey): Model {
+/** The model of whichever alien turned up, in whichever shape it is in. */
+export function buildAlien(key: AlienKey, form = 1): Model {
   switch (key) {
     case 'chloe':
       return chloe();
@@ -1337,10 +1459,221 @@ export function buildAlien(key: AlienKey): Model {
       return giantTank();
     case 'guimei':
       return ghost();
+    case 'tuolong':
+      return form === 2 ? dragon() : dinosaur();
+    case 'zecan':
+      return rockGiant(form === 2 ? 0.62 : 1);
+    case 'yaqian':
+      return goddess();
   }
 }
 
-/** One of 奎德's small spiders. */
-export function buildSpiderling(): Model {
-  return spider(0.38);
+/** One of the aliens' small fry: a spider 奎德 hatched, or a skeleton 雅千 raised. */
+export function buildMinion(kind: MinionKind): Model {
+  return kind === 'skeleton' ? skeleton() : spider(0.38);
+}
+
+/** 拓龙 as it first shows itself: a green dinosaur up on two legs, its jaws towards +Z. */
+function dinosaur(): Model {
+  const g = new THREE.Group();
+  const skin = mat(0x22a55a, { rough: 0.55 });
+  const belly = mat(0xa7e08f, { rough: 0.7 });
+  const dark = mat(0x15803d, { rough: 0.6 });
+  const claw = mat(0xf3f4d8, { rough: 0.5 });
+  const eye = glow(0xfde047, 1.8);
+  // Legs: a thick thigh, a shin, and a foot with three claws.
+  for (const side of [-1, 1]) {
+    add(g, cap(0.085, 0.14), skin, side * 0.16, 0.34, -0.08, [0.3, 0, side * 0.1]);
+    limb(g, [side * 0.2, 0.26, -0.02], [side * 0.21, 0.07, 0.08], 0.045, skin);
+    add(g, box(0.12, 0.05, 0.24), skin, side * 0.21, 0.035, 0.14);
+    for (const t of [-0.04, 0, 0.04]) add(g, cone(0.015, 0.07, 5), claw, side * 0.21 + t, 0.03, 0.29, [Math.PI / 2, 0, 0]);
+  }
+  // Heavy at the hips, lighter at the chest, pale underneath.
+  add(g, sph(0.24, 14), skin, 0, 0.5, -0.1).scale.set(1, 0.9, 1.35);
+  add(g, sph(0.18, 12), skin, 0, 0.63, 0.2).scale.set(0.95, 1, 1.1);
+  add(g, sph(0.15, 12), belly, 0, 0.5, 0.14).scale.set(0.9, 0.9, 1.25);
+  // The tail, in three lengths, tapering away behind.
+  add(g, cone(0.13, 0.5, 8), skin, 0, 0.42, -0.52, [-Math.PI / 2 - 0.28, 0, 0]);
+  add(g, cone(0.075, 0.45, 8), skin, 0, 0.3, -0.88, [-Math.PI / 2 - 0.12, 0, 0]);
+  add(g, cone(0.04, 0.3, 8), dark, 0, 0.24, -1.16, [-Math.PI / 2, 0, 0]);
+  // Little arms, claws at the ready.
+  for (const side of [-1, 1]) {
+    limb(g, [side * 0.15, 0.63, 0.26], [side * 0.21, 0.5, 0.4], 0.028, skin);
+    for (const t of [-0.02, 0.02]) add(g, cone(0.01, 0.05, 5), claw, side * 0.21 + t, 0.48, 0.44, [Math.PI / 2, 0, 0]);
+  }
+  // The head on a short neck: long jaws, a row of teeth, an eye on each side.
+  limb(g, [0, 0.7, 0.26], [0, 0.86, 0.42], 0.085, skin);
+  add(g, sph(0.13, 12), skin, 0, 0.9, 0.48).scale.set(1, 0.9, 1.15);
+  add(g, box(0.16, 0.07, 0.32), skin, 0, 0.87, 0.66);
+  add(g, box(0.13, 0.045, 0.28), belly, 0, 0.8, 0.65);
+  for (let i = 0; i < 4; i++) for (const side of [-1, 1]) add(g, cone(0.013, 0.04, 4), claw, side * 0.06, 0.83, 0.58 + i * 0.06, [Math.PI, 0, 0]);
+  for (const side of [-1, 1]) {
+    add(g, sph(0.032, 8), eye, side * 0.1, 0.95, 0.57);
+    add(g, sph(0.014, 6), mat(0x111827), side * 0.122, 0.95, 0.585);
+    add(g, sph(0.012, 6), dark, side * 0.045, 0.905, 0.81);
+  }
+  // Plates down its back.
+  for (let i = 0; i < 5; i++) add(g, cone(0.05 - i * 0.005, 0.1 - i * 0.01, 4), dark, 0, 0.84 - i * 0.085, 0.2 - i * 0.16, [-0.3, 0.44, 0]);
+  add(g, torus(0.6, 0.014), glow(0x22c55e, 1.4), 0, 0.04, 0, [Math.PI / 2, 0, 0]);
+  return done({ group: g, heads: [], height: 1.1 });
+}
+
+/** A wing's membrane: a triangle with its root along z, from `front` to `back`, sweeping out to `reach` on side `side`. */
+const sail = (reach: number, front: number, back: number, side: number): THREE.BufferGeometry =>
+  cached(`m${reach},${front},${back},${side}`, () => {
+    const s = new THREE.Shape();
+    s.moveTo(0, front);
+    s.lineTo(side * reach, back + 0.08);
+    s.lineTo(0, back);
+    s.closePath();
+    return new THREE.ExtrudeGeometry(s, { depth: 0.014, bevelEnabled: false }).translate(0, 0, -0.007).rotateX(Math.PI / 2);
+  });
+
+/**
+ * 拓龙 once its first shape has gone down: a black dragon hanging in the air
+ * on beating wings, fire in its jaws. The wings swing at the shoulders.
+ */
+function dragon(): Model {
+  const g = new THREE.Group();
+  const scale = mat(0x15161c, { rough: 0.4, metal: 0.35, emissive: 0x1c0a0a, glow: 0.7 });
+  const membrane = mat(0x5b1f2c, { rough: 0.5, metal: 0.15, emissive: 0x991b1b, glow: 0.8, opacity: 0.94 });
+  const spine = mat(0x3b3b47, { rough: 0.4, metal: 0.4 });
+  const fire = glow(0xff6b35, 2.4);
+  const motion: Motion[] = [];
+  // Wings: the bones and the skin between them, spread about the shoulder and held a little raised.
+  for (const side of [-1, 1]) {
+    const w = new THREE.Group();
+    w.userData.live = true;
+    add(w, sail(0.86, 0.14, -0.3, side), membrane);
+    add(w, sail(0.5, -0.2, -0.56, side), membrane);
+    add(w, sail(0.24, -0.36, -0.62, side), membrane);
+    limb(w, [0, 0.015, 0.14], [side * 0.86, 0.015, -0.22], 0.028, scale);
+    limb(w, [0, 0.015, 0.02], [side * 0.5, 0.015, -0.48], 0.02, scale);
+    limb(w, [0, 0.015, -0.1], [side * 0.24, 0.015, -0.6], 0.018, scale);
+    w.position.set(side * 0.13, 0.52, 0);
+    // Raised at rest, so that they show from above as much as from the side.
+    w.rotation.z = side * 0.24;
+    g.add(w);
+    // The two beat as one: the same swing, read mirrored on the other side.
+    motion.push({ part: w, axis: 'z', speed: 3.6, swing: 0.36, phase: side > 0 ? 0 : Math.PI });
+  }
+  // Body, chest, a long neck and the head with its jaws of fire.
+  add(g, sph(0.2, 14), scale, 0, 0.5, -0.08).scale.set(1, 0.85, 1.7);
+  add(g, sph(0.15, 12), scale, 0, 0.56, 0.32);
+  limb(g, [0, 0.58, 0.38], [0, 0.88, 0.64], 0.07, scale);
+  add(g, sph(0.12, 12), scale, 0, 0.96, 0.74).scale.set(1, 0.85, 1.35);
+  add(g, box(0.13, 0.05, 0.24), scale, 0, 0.9, 0.94);
+  add(g, sph(0.04, 8), fire, 0, 0.93, 1.05);
+  for (const side of [-1, 1]) {
+    add(g, sph(0.028, 8), glow(0xff2d55, 2.4), side * 0.085, 1.02, 0.82);
+    add(g, cone(0.018, 0.15, 6), spine, side * 0.05, 1.08, 0.6, [-2.5, 0, side * 0.3]);
+  }
+  // The tail, and a fin at the end of it.
+  add(g, cone(0.12, 0.55, 8), scale, 0, 0.44, -0.66, [-Math.PI / 2 - 0.1, 0, 0]);
+  add(g, cone(0.06, 0.5, 8), scale, 0, 0.32, -1.1, [-Math.PI / 2 - 0.05, 0, 0]);
+  add(g, sail(0.16, 0.1, -0.14, 1), membrane, 0.0, 0.28, -1.34, [0, 0, 0]).scale.set(1, 1, 1);
+  // Legs tucked up under it.
+  for (const side of [-1, 1]) {
+    limb(g, [side * 0.13, 0.42, 0.1], [side * 0.22, 0.2, 0.2], 0.04, scale);
+    add(g, sph(0.05, 8), spine, side * 0.22, 0.18, 0.22);
+  }
+  // Spines along its back.
+  for (let i = 0; i < 6; i++) add(g, cone(0.03, 0.09, 4), spine, 0, 0.72 - Math.abs(i - 2) * 0.03, 0.3 - i * 0.17, [-0.25, 0.44, 0]);
+  return done({ group: g, heads: [], height: 1.2, motion });
+}
+
+/** 泽参: a giant heaped up out of boulders, with fire in its cracks. Scaled down it is one of the small ones. */
+function rockGiant(scale: number): Model {
+  const g = new THREE.Group();
+  const rock = mat(0x74736a, { rough: 0.95, metal: 0.02 });
+  const rockD = mat(0x54534d, { rough: 0.95 });
+  const rockL = mat(0x8f8e84, { rough: 0.9 });
+  const magma = glow(0xff8a3d, 1.7);
+  const eye = glow(0xffd166, 2.2);
+  // Squat legs.
+  for (const side of [-1, 1]) {
+    add(g, dodeca(0.15), rockD, side * 0.2, 0.2, 0).scale.set(0.9, 1.15, 0.9);
+    add(g, box(0.22, 0.1, 0.3), rockD, side * 0.2, 0.05, 0.05);
+  }
+  // The torso, a heap of boulders broad at the shoulders.
+  add(g, dodeca(0.34), rock, 0, 0.58, 0).scale.set(1.15, 1, 0.82);
+  add(g, dodeca(0.2), rockL, -0.19, 0.74, 0.1);
+  add(g, dodeca(0.18), rockL, 0.21, 0.72, 0.1);
+  add(g, dodeca(0.15), rockD, 0.02, 0.5, 0.22);
+  // Fire showing through the cracks.
+  add(g, box(0.022, 0.24, 0.022), magma, -0.09, 0.6, 0.29, [0, 0, 0.35]);
+  add(g, box(0.022, 0.17, 0.022), magma, 0.1, 0.54, 0.29, [0, 0, -0.3]);
+  add(g, box(0.022, 0.022, 0.2), magma, 0.0, 0.68, 0.24);
+  // Arms like tree trunks, down to the ground, ending in boulders.
+  for (const side of [-1, 1]) {
+    add(g, dodeca(0.15), rockD, side * 0.45, 0.68, 0).scale.set(1, 1.2, 1);
+    add(g, dodeca(0.12), rock, side * 0.51, 0.4, 0.05).scale.set(0.9, 1.5, 0.9);
+    add(g, dodeca(0.18), rockL, side * 0.53, 0.16, 0.12);
+  }
+  // A small head sunk between the shoulders.
+  add(g, dodeca(0.12), rockD, 0, 0.93, 0.08);
+  for (const side of [-1, 1]) add(g, sph(0.024, 6), eye, side * 0.052, 0.95, 0.18);
+  add(g, torus(0.66, 0.014), glow(0xff8a3d, 1.1), 0, 0.04, 0, [Math.PI / 2, 0, 0]);
+  g.scale.setScalar(scale);
+  return done({ group: g, heads: [], height: 1.08 * scale });
+}
+
+/** 雅千: a goddess in white, hanging in the air inside a ball of light, a halo over her head. */
+function goddess(): Model {
+  const g = new THREE.Group();
+  const robe = mat(0xf8fafc, { emissive: 0xcbd5f5, glow: 0.5, rough: 0.5 });
+  const skin = mat(0xffe9d6, { rough: 0.6 });
+  const hair = mat(0xeef2ff, { emissive: 0xa5b4fc, glow: 0.7, rough: 0.4 });
+  const gold = mat(0xfbbf24, { metal: 0.7, rough: 0.3, emissive: 0xb45309, glow: 0.7 });
+  // The robe falling away under her, a belt, a sash of gold.
+  add(g, cone(0.21, 0.64, 16), robe, 0, 0.42, 0);
+  add(g, cyl(0.078, 0.095, 0.22, 10), robe, 0, 0.84, 0);
+  add(g, torus(0.105, 0.014), gold, 0, 0.76, 0, [Math.PI / 2, 0, 0]);
+  // Arms held out a little, the hands open.
+  for (const side of [-1, 1]) {
+    add(g, cap(0.026, 0.16), robe, side * 0.125, 0.87, 0.02, [0, 0, side * 1.05]);
+    add(g, sph(0.03, 8), skin, side * 0.215, 0.93, 0.02);
+  }
+  // Head and face, hair drawn up and falling down her back.
+  add(g, sph(0.12, 16), skin, 0, 1.08, 0);
+  for (const side of [-1, 1]) add(g, sph(0.017, 8), mat(0x4c1d95), side * 0.045, 1.09, 0.106);
+  const capGeo = new THREE.SphereGeometry(0.133, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.6);
+  add(g, capGeo, hair, 0, 1.09, -0.01, [-0.35, 0, 0]);
+  add(g, sph(0.052, 8), hair, 0, 1.2, -0.03);
+  add(g, cyl(0.05, 0.09, 0.52, 8), hair, 0, 0.86, -0.13, [0.12, 0, 0]);
+  // Wings of light, and the halo.
+  for (const side of [-1, 1]) add(g, cone(0.1, 0.52, 4), mat(0xffffff, { emissive: 0xe0e7ff, glow: 1, opacity: 0.4 }), side * 0.22, 0.84, -0.12, [0, 0, side * 2.25]).scale.set(1, 1, 0.22);
+  add(g, torus(0.21, 0.012), glow(0xffffff, 1.6), 0, 1.33, 0, [Math.PI / 2, 0, 0]);
+  // The shield itself: a ball of white light round the whole of her.
+  const shield = new THREE.Mesh(
+    new THREE.SphereGeometry(0.66, 20, 14),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.17, depthWrite: false }),
+  );
+  shield.position.y = 0.76;
+  shield.userData.keep = true;
+  shield.geometry.userData.owned = true;
+  (shield.material as THREE.Material).userData.owned = true;
+  g.add(shield);
+  g.userData.aura = shield;
+  return done({ group: g, heads: [], height: 1.42 });
+}
+
+/** One of 雅千's skeletons: a small figure of bone with a rusty blade. */
+function skeleton(): Model {
+  const g = new THREE.Group();
+  const bone = mat(0xe7e5d8, { rough: 0.6 });
+  const dark = mat(0x1f2430);
+  // Rib cage and spine, a skull with hollow eyes.
+  add(g, cyl(0.014, 0.014, 0.2, 6), bone, 0, 0.31, 0);
+  for (let i = 0; i < 3; i++) add(g, torus(0.045, 0.008), bone, 0, 0.27 + i * 0.035, 0, [Math.PI / 2, 0, 0]);
+  add(g, sph(0.06, 10), bone, 0, 0.47, 0);
+  add(g, box(0.055, 0.028, 0.04), bone, 0, 0.42, 0.025);
+  for (const side of [-1, 1]) add(g, sph(0.016, 6), dark, side * 0.025, 0.475, 0.05);
+  // Legs and arms, and a blade in one hand.
+  for (const side of [-1, 1]) {
+    limb(g, [side * 0.03, 0.22, 0], [side * 0.055, 0.01, 0.02], 0.012, bone);
+    limb(g, [side * 0.045, 0.38, 0], [side * 0.085, 0.27, 0.05], 0.01, bone);
+  }
+  add(g, box(0.02, 0.02, 0.2), mat(0x9aa2b1, { metal: 0.6, rough: 0.4 }), 0.1, 0.25, 0.14, [0.25, 0, 0]);
+  return done({ group: g, heads: [], height: 0.55 });
 }

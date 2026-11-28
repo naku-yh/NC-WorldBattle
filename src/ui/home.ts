@@ -8,7 +8,7 @@ export interface HomeActions {
 }
 
 /** What the corner of the title screen says about this build. */
-const VERSION = 'Version 0.95 - 20261127';
+const VERSION = 'Version 0.98 - 20261128';
 
 /** Button wording and picture, by which button it is. */
 const LABELS = { new: ['新游戏', 'NEW GAME', 'play'], load: ['加载存档', 'LOAD GAME', 'load'] } as const;

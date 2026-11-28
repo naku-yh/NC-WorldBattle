@@ -4,6 +4,7 @@ import { isMusterLocal, isReservedLocal, laneTiles, terrainAt, toLocal, toWorld,
 import type { GameState, Pt } from '../game/types';
 import { worldOf } from './coords';
 import { bake, scrap } from './models';
+import { WaterShape, type WaterPoint } from './water';
 
 // Static scenery for the map: woods, rocks, grass, bridges and the water.
 // Everything here is decorative; none of it takes part in picking.
@@ -156,14 +157,21 @@ function tilesOf(s: GameState, kinds: string[]): Pt[] {
   return out;
 }
 
-/** Spread `count` things round the edge of a tile, leaving the middle for whoever stands there. */
-function around(s: GameState, t: Pt, count: number, r0: number, r1: number): Array<{ x: number; z: number; a: number; k: number }> {
-  const at = worldOf(t.x, t.y, s.boardSize);
+/**
+ * Spread `count` things round the edge of a tile, leaving the middle for whoever stands there.
+ * Nothing is left standing in the water that rounds off into the corners of dry tiles beside a river.
+ */
+function around(n: number, water: WaterShape, t: Pt, count: number, r0: number, r1: number): Array<{ x: number; z: number; a: number; k: number }> {
+  const half = (n - 1) / 2;
+  const at = worldOf(t.x, t.y, n);
   const out: Array<{ x: number; z: number; a: number; k: number }> = [];
   for (let k = 0; k < count; k++) {
     const a = noise(t.x, t.y, k) * Math.PI * 2 + k * 2.4;
     const r = r0 + noise(t.x, t.y, k, 1) * (r1 - r0);
-    out.push({ x: at.x + Math.cos(a) * r, z: at.z + Math.sin(a) * r, a, k });
+    const x = at.x + Math.cos(a) * r;
+    const z = at.z + Math.sin(a) * r;
+    if (water.at(x + half, half - z)) continue;
+    out.push({ x, z, a, k });
   }
   return out;
 }
@@ -192,12 +200,12 @@ function paved(s: GameState): Set<string> {
   return out;
 }
 
-function woods(s: GameState): Record<'pine' | 'leaf', Spot[]> {
+function woods(n: number, water: WaterShape, s: GameState): Record<'pine' | 'leaf', Spot[]> {
   const pine: Spot[] = [];
   const leaf: Spot[] = [];
   for (const t of tilesOf(s, ['forest'])) {
     const count = 3 + Math.floor(noise(t.x, t.y, 9) * 2);
-    for (const o of around(s, t, count, 0.28, 0.43)) {
+    for (const o of around(n, water, t, count, 0.28, 0.43)) {
       const spot: Spot = { x: o.x, z: o.z, rot: noise(t.x, t.y, o.k, 3) * Math.PI * 2, scale: 0.85 + noise(t.x, t.y, o.k, 2) * 0.6, color: 0 };
       if (noise(t.x, t.y, o.k, 4) < 0.55) {
         spot.color = pick(GREENS, t.x, t.y, o.k, 5);
@@ -264,67 +272,52 @@ function bridge(s: GameState, at: THREE.Vector3): THREE.Group {
   return g;
 }
 
-/** Whether the tile is under water. */
-const wet = (s: GameState, x: number, y: number): boolean => terrainAt(s, x, y) === 'water' || terrainAt(s, x, y) === 'lake';
-
 /**
- * One sheet for every wet tile. Each tile keeps its own four corners,
- * carrying where in the tile they are and which of its sides are dry: that is
- * what puts the foam along the banks of a river only one tile wide. A tile
- * also says whether its water is a river on the move or a lake at rest.
+ * One sheet over the whole of the water, in the smooth shape of `water.ts`:
+ * every piece of that shape fanned out from its hub. Each point carries how
+ * far it lies from the nearest bank, which is what puts the foam along the
+ * banks, and whether its water is a river on the move or a lake at rest.
  */
 function waterSheet(s: GameState): { geo: THREE.BufferGeometry; river: boolean } | null {
+  const { pieces, river } = new WaterShape(s);
   const n = s.boardSize;
   const half = (n - 1) / 2;
   const position: number[] = [];
-  const uv: number[] = [];
-  const bank: number[] = [];
+  const depth: number[] = [];
   const flow: number[] = [];
   const index: number[] = [];
-  let river = false;
-  // Off the board counts as dry: the water breaks against its edge.
-  const dry = (x: number, y: number): number => (x < 0 || y < 0 || x >= n || y >= n || !wet(s, x, y) ? 1 : 0);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      if (!wet(s, x, y)) continue;
-      const moving = terrainAt(s, x, y) === 'water';
-      river ||= moving;
-      const first = position.length / 3;
-      // (u, v) run along the board's x and along the world's z, which is the board's y the other way round.
-      for (const [u, v] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-        position.push(x - half - 0.5 + u, 0.012, half - y + 0.5 - v);
-        uv.push(u, v);
-        // Dry towards -x, +x, -z and +z.
-        bank.push(dry(x - 1, y), dry(x + 1, y), dry(x, y + 1), dry(x, y - 1));
-        flow.push(moving ? 1 : 0);
-      }
-      index.push(first, first + 1, first + 2, first + 1, first + 3, first + 2);
-    }
+  for (const piece of pieces) {
+    const first = position.length / 3;
+    // The board's y runs the other way round from the world's z.
+    const put = ([x, y, d]: WaterPoint): void => {
+      position.push(x - half - 0.5, 0.012, half + 0.5 - y);
+      depth.push(d);
+      flow.push(piece.flow);
+    };
+    put(piece.hub);
+    piece.outline.forEach(put);
+    for (let i = 0; i < piece.outline.length; i++) index.push(first, first + 1 + i, first + 1 + ((i + 1) % piece.outline.length));
   }
   if (!position.length) return null;
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
-  geo.setAttribute('aUv', new THREE.Float32BufferAttribute(uv, 2));
-  geo.setAttribute('aBank', new THREE.Float32BufferAttribute(bank, 4));
+  geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
   geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flow, 1));
   geo.setIndex(index);
   return { geo, river };
 }
 
 const WATER_VERT = /* glsl */ `
-  attribute vec2 aUv;
-  attribute vec4 aBank;
+  attribute float aDepth;
   attribute float aFlow;
   varying vec3 vWorld;
-  varying vec2 vUv;
-  varying vec4 vBank;
+  varying float vDepth;
   varying float vFlow;
   #include <fog_pars_vertex>
   void main() {
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
-    vUv = aUv;
-    vBank = aBank;
+    vDepth = aDepth;
     vFlow = aFlow;
     vec4 mvPosition = viewMatrix * world;
     gl_Position = projectionMatrix * mvPosition;
@@ -341,8 +334,7 @@ const WATER_FRAG = /* glsl */ `
   uniform vec3 uShallow;
   uniform vec2 uFlow;
   varying vec3 vWorld;
-  varying vec2 vUv;
-  varying vec4 vBank;
+  varying float vDepth;
   varying float vFlow;
   #include <fog_pars_fragment>
 
@@ -387,12 +379,8 @@ const WATER_FRAG = /* glsl */ `
     col = mix(col, uSky, fresnel * 0.75);
     col += uSunColor * (glint + sparkle * 0.7);
 
-    // How far this point is from the nearest dry side of its tile.
-    float d = 1.0;
-    if (vBank.x > 0.5) d = min(d, vUv.x);
-    if (vBank.y > 0.5) d = min(d, 1.0 - vUv.x);
-    if (vBank.z > 0.5) d = min(d, vUv.y);
-    if (vBank.w > 0.5) d = min(d, 1.0 - vUv.y);
+    // How far this point is from the nearest bank, in tiles.
+    float d = vDepth;
     // Foam in a broken band along the banks, and a fleck out in the stream now and then.
     float lace = noise(p * 7.0 - uFlow * t * 0.8 * vFlow);
     float fleck = noise(p * 13.0 + uFlow * t * 0.5);
@@ -428,7 +416,9 @@ export class TerrainDecor {
       this.group.add(mesh);
     };
     // Woods: each tree is one instance of its kind, its crown another of the kind above it.
-    const forest = woods(s);
+    // The water's shape, worked out once: the scenery keeps out of it, and the sheet of water is cut to it.
+    const water = new WaterShape(s);
+    const forest = woods(n, water, s);
     keep(instanced(PINE_TRUNK, BARK, trunks(forest.pine, 11), true));
     keep(instanced(PINE_TOP, PINE, forest.pine, true));
     keep(instanced(LEAF_TRUNK, BARK, trunks(forest.leaf, 12), true));
@@ -440,7 +430,7 @@ export class TerrainDecor {
     const pebbles: Spot[] = [];
     for (const t of tilesOf(s, ['hill'])) {
       const at = worldOf(t.x, t.y, n);
-      for (const o of around(s, t, 2 + Math.floor(noise(t.x, t.y, 7) * 2), 0.22, 0.4)) {
+      for (const o of around(n, water, t, 2 + Math.floor(noise(t.x, t.y, 7) * 2), 0.22, 0.4)) {
         const sc = 0.7 + noise(t.x, t.y, o.k, 7) * 0.9;
         stones.push({ x: o.x, z: o.z, rot: noise(t.x, t.y, o.k, 8) * Math.PI, scale: sc, color: pick(STONES, t.x, t.y, o.k, 10) });
       }
@@ -448,7 +438,7 @@ export class TerrainDecor {
         const a = noise(t.x, t.y, 1, 41) * Math.PI * 2;
         boulders.push({ x: at.x + Math.cos(a) * 0.2, z: at.z + Math.sin(a) * 0.2, rot: a, scale: 0.7 + noise(t.x, t.y, 2, 42) * 0.7, color: pick(STONES, t.x, t.y, 3, 43) });
       }
-      for (const o of around(s, t, 4, 0.2, 0.43)) pebbles.push({ x: o.x, z: o.z, rot: o.a, scale: 0.6 + noise(t.x, t.y, o.k, 11) * 0.8, color: pick(STONES, t.x, t.y, o.k, 12) });
+      for (const o of around(n, water, t, 4, 0.2, 0.43)) pebbles.push({ x: o.x, z: o.z, rot: o.a, scale: 0.6 + noise(t.x, t.y, o.k, 11) * 0.8, color: pick(STONES, t.x, t.y, o.k, 12) });
     }
     keep(instanced(ROCK, STONE, stones, true));
     keep(instanced(BOULDER, STONE, boulders, true));
@@ -461,11 +451,11 @@ export class TerrainDecor {
     for (const t of tilesOf(s, ['plain'])) {
       if (laid.has(`${t.x},${t.y}`) || s.nodes.some((nd) => nd.x === t.x && nd.y === t.y)) continue;
       const count = Math.floor(noise(t.x, t.y, 0, 50) * 4);
-      for (const o of around(s, t, count, 0.28, 0.46)) {
+      for (const o of around(n, water, t, count, 0.28, 0.46)) {
         tufts.push({ x: o.x, z: o.z, rot: o.a, scale: 0.7 + noise(t.x, t.y, o.k, 51) * 0.9, color: pick(GRASSES, t.x, t.y, o.k, 52) });
       }
       const buds = noise(t.x, t.y, 0, 53) < 0.3 ? 1 + Math.floor(noise(t.x, t.y, 1, 54) * 2) : 0;
-      for (const o of around(s, t, buds, 0.3, 0.44)) blooms.push({ x: o.x, z: o.z, rot: o.a, scale: 0.8 + noise(t.x, t.y, o.k, 55) * 0.6, color: pick(FLOWERS, t.x, t.y, o.k, 56) });
+      for (const o of around(n, water, t, buds, 0.3, 0.44)) blooms.push({ x: o.x, z: o.z, rot: o.a, scale: 0.8 + noise(t.x, t.y, o.k, 55) * 0.6, color: pick(FLOWERS, t.x, t.y, o.k, 56) });
     }
     keep(instanced(TUFT, GRASS, tufts, false));
     keep(instanced(BLOSSOM, FLOWER, blooms, false));

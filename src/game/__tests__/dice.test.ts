@@ -19,12 +19,22 @@ describe('掷骰子分配行动点', () => {
     expect(dice.map((d) => d.player)).toEqual([1, 0]);
   });
 
-  it('三人/四人：中间点数没有行动点', () => {
+  it('三人：中间点数没有行动点', () => {
     const three = rollDice(scripted([4, 6, 2]), [0, 1, 2]);
     expect([0, 1, 2].map((id) => apOf(three, id))).toEqual([0, 3, 1]);
+  });
+
+  it('四人：第一 +3、第二 +2、第三 +1、第四没有；第二、三名并列时加掷', () => {
     const four = rollDice(scripted([4, 6, 5, 2]), [0, 1, 2, 3]);
-    expect([0, 1, 2, 3].map((id) => apOf(four, id))).toEqual([0, 3, 0, 1]);
+    expect([0, 1, 2, 3].map((id) => apOf(four, id))).toEqual([1, 3, 2, 0]);
     expect(four.map((d) => d.player)).toEqual([1, 2, 0, 3]);
+
+    // 6, 4, 4, 2: players 1 and 2 are level for second place and throw again, 3 against 5.
+    const tied = rollDice(scripted([6, 4, 4, 2, 3, 5]), [0, 1, 2, 3]);
+    expect(tied.map((d) => d.player)).toEqual([0, 2, 1, 3]);
+    expect([0, 1, 2, 3].map((id) => apOf(tied, id))).toEqual([3, 1, 2, 0]);
+    expect(tied.find((d) => d.player === 1)!.rolls).toEqual([4, 3]);
+    expect(tied.find((d) => d.player === 2)!.rolls).toEqual([4, 5]);
   });
 
   it('最大点数并列时只让并列者加掷', () => {
@@ -48,13 +58,13 @@ describe('掷骰子分配行动点', () => {
     expect([0, 1, 2].map((id) => apOf(dice, id))).toEqual([0, 3, 1]);
   });
 
-  it('任何情况下都恰好一人 +3、一人 +1、其余 +0', () => {
+  it('任何情况下行动点的总和都固定：两三人 +3 与 +1，四人 +3、+2、+1、+0', () => {
     for (const n of [2, 3, 4]) {
       for (let seed = 1; seed <= 500; seed++) {
         const ids = Array.from({ length: n }, (_, i) => i);
         const dice = rollDice(new Rng(seed * 7919 + n), ids);
         const aps = ids.map((id) => apOf(dice, id)).sort((a, b) => a - b);
-        expect(aps).toEqual([...Array(n - 2).fill(0), 1, 3]);
+        expect(aps).toEqual(n === 4 ? [0, 1, 2, 3] : [...Array(n - 2).fill(0), 1, 3]);
         // Everyone rolled at least once and re-rolls are recorded in order.
         for (const d of dice) {
           expect(d.rolls.length).toBeGreaterThanOrEqual(1);

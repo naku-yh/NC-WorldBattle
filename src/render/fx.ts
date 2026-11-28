@@ -52,6 +52,10 @@ const SPECS: Record<AttackStyle, ShotSpec> = {
   flak: { color: 0xe2e8f0, speed: 15, arc: 0.7, size: 0.6, trail: null, sparks: 9, sparkColor: 0xe0f2fe, flash: 0.4 },
   bomb: { color: 0xfca5a5, speed: 11, arc: 0.1, size: 1.1, trail: 0xf87171, sparks: 26, sparkColor: 0xfdba74, flash: 1.1 },
   alien: { color: 0xc084fc, speed: 10, arc: 0.4, size: 1.2, trail: 0xa78bfa, sparks: 18, sparkColor: 0x86efac, flash: 0.9 },
+  // 拓龙's spit, its fireball once it is a dragon, and 雅千's light.
+  spit: { color: 0x86efac, speed: 20, arc: 0.12, size: 0.7, trail: 0x22c55e, sparks: 10, sparkColor: 0xbbf7d0, flash: 0.45 },
+  fire: { color: 0xff7a29, speed: 13, arc: 0.35, size: 1.2, trail: 0xf97316, sparks: 26, sparkColor: 0xfdba74, flash: 1.2 },
+  light: { color: 0xffffff, speed: 46, arc: 0, size: 0.7, trail: 0xe0e7ff, sparks: 12, sparkColor: 0xffffff, flash: 0.6 },
 };
 
 const CAP = 900;
@@ -198,6 +202,25 @@ export class Fx {
     this.emit(at, 0xfff7cc, Math.round(8 * size), 1.2, 0.35);
     this.flash(at, 0xffc46b, 1.3 * size, 0.4);
     this.after(0.12, () => this.emit(at, 0xff8a3d, Math.round(10 * size), 1.6, 0.8));
+  }
+
+  /**
+   * A shell or a bomb landing with a splash: a sheet of flame over the tile it
+   * hit and over the four tiles in line with it, so the shape of the blast is
+   * plain to see.
+   */
+  blast(at: THREE.Vector3): void {
+    this.flash(at.clone().setY(0.14), 0xffc46b, 1.5, 0.45);
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      const q = at.clone().add(new THREE.Vector3(dx, 0, dz)).setY(0.12);
+      this.flash(q, 0xff9f43, 1.05, 0.5);
+      this.emit(q, 0xffa94d, 8, 1.6, 0.5);
+    }
   }
 
   /** Something teleporting in from above. */
